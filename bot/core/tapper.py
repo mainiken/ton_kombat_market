@@ -1409,6 +1409,55 @@ class TonKombatBot(BaseBot):
             ))
             return False
 
+    async def upgrades(self, query: str, upgrade_type: str) -> bool:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/upgrades'
+        data = json.dumps({'type': upgrade_type})
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}',
+            'Content-Length': str(len(data)),
+            'Content-Type': 'application/json'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url=url, 
+                    headers=headers, 
+                    data=data,
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    if response.status == 400:
+                        error_data = await response.json()
+                        if error_data.get('message') == 'not enough tok balance':
+                            logger.debug(self.log_message(
+                                f"Not enough TOK to upgrade {upgrade_type}"
+                            ))
+                            return False
+                        logger.warning(self.log_message(
+                            f"Error upgrading {upgrade_type}: "
+                            f"{error_data.get('message', 'Unknown error')}"
+                        ))
+                        return False
+                        
+                    response.raise_for_status()
+                    result = await response.json()
+                    
+                    if result and 'data' in result:
+                        logger.success(self.log_message(
+                            f"Successfully upgraded {upgrade_type}"
+                        ))
+                        return True
+                    return False
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error upgrading {upgrade_type}: {e}",
+                'error'
+            ))
+            return False
+
     async def get_upgrades_info(self, query: str) -> Optional[Dict]:
         await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/upgrades'
