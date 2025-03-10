@@ -262,6 +262,11 @@ class TonKombatBot(BaseBot):
         'Join Crypto Garden',
         'Join Our Community'
     }
+    
+    MAX_UPGRADE_LEVELS = {
+        'pocket-size': 10,
+        'mining-tok': float('inf')
+    }
 
     def __init__(self, tg_client: UniversalTelegramClient):
         super().__init__(tg_client)
@@ -1458,32 +1463,6 @@ class TonKombatBot(BaseBot):
             ))
             return False
 
-    async def get_upgrades_info(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/upgrades'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    return result.get('data')
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting upgrades information: {e}",
-                'error'
-            ))
-            return None
-
     async def check_and_do_upgrades(self, query: str) -> None:
         await self.add_request_delay()
         upgrade_types = ['mining-tok', 'pocket-size']
@@ -1495,17 +1474,21 @@ class TonKombatBot(BaseBot):
         current_balance = float(balance['data'] / 1000000000)
         if current_balance <= 1:
             return
-
-        upgrades_info = await self.get_upgrades_info(query)
-        if not upgrades_info:
+            
+        user_info = await self.get_user_info(query)
+        if not user_info or 'data' not in user_info:
             return
             
         for upgrade_type in upgrade_types:
-            if upgrade_type == 'pocket-size':
-                current_level = upgrades_info.get('pocket_size', {}).get('level', 0)
-                if current_level >= 10:
-                    continue
-
+            max_level = self.MAX_UPGRADE_LEVELS.get(upgrade_type, float('inf'))
+            current_level = user_info['data'].get(f'{upgrade_type}_level', 0)
+            
+            if current_level >= max_level:
+                logger.debug(self.log_message(
+                    f"Maximum level ({max_level}) reached for {upgrade_type}"
+                ))
+                continue
+                
             max_attempts = randint(1, 3)
             
             for _ in range(max_attempts):
