@@ -934,9 +934,13 @@ class TonKombatBot(BaseBot):
                         status = hunting_data.get('status', 'unknown')
                         
                         if 'end_time' in hunting_data:
-                            end_time = datetime.fromisoformat(
-                                hunting_data['end_time'].replace('Z', '+00:00')
-                            ).astimezone(timezone.utc)
+                            end_time_str = hunting_data['end_time'].replace('Z', '+00:00')
+                            if '.' in end_time_str:
+                                base, fraction = end_time_str.split('.')
+                                fraction = fraction.split('+')[0][:6]
+                                end_time_str = f"{base}.{fraction}+00:00"
+                            
+                            end_time = datetime.fromisoformat(end_time_str)
                             now = datetime.now(timezone.utc)
                             
                             if end_time > now:
