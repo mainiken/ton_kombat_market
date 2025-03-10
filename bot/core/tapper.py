@@ -652,17 +652,34 @@ class TonKombatBot(BaseBot):
         if all_items is None:
             return
             
-        equipped_types = {item['type'] for item in equipped_items}
-        
+        best_items = {}
         for item in all_items:
-            if item['type'] not in equipped_types and item['status'] == 'inventory':
-                await self.equip_item(query, item['id'])
-                equipped_types.add(item['type'])
+            item_type = item['type']
+            item_quality = item.get('quality', 0)
+            
+            if (item_type not in best_items or 
+                item_quality > best_items[item_type]['quality']):
+                best_items[item_type] = {
+                    'id': item['id'],
+                    'quality': item_quality,
+                    'status': item['status']
+                }
+        
+        for item_type, best_item in best_items.items():
+            equipped_item = next(
+                (item for item in equipped_items if item['type'] == item_type), 
+                None
+            )
+            
+            if (equipped_item is None or 
+                best_item['quality'] > equipped_item.get('quality', 0)):
+                if best_item['status'] == 'inventory':
+                    await self.equip_item(query, best_item['id'])
+                    await asyncio.sleep(uniform(1, 2))
 
     async def combats_me(self, query: str) -> None:
         await self.add_request_delay()
         
-        # Проверяем и экипируем предметы перед боем
         await self.check_and_equip_items(query)
         
         url = 'https://liyue.tonkombat.com/api/v1/combats/me'
