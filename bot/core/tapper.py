@@ -256,6 +256,11 @@ class TonKombatBot(BaseBot):
         'onboard': '🎮'
     }
 
+    BLACKLISTED_TASKS = {
+        'Join Crypto Garden',
+        'Join Our Community'
+    }
+
     def __init__(self, tg_client: UniversalTelegramClient):
         super().__init__(tg_client)
         session_config = config_utils.get_session_config(
@@ -1098,6 +1103,9 @@ class TonKombatBot(BaseBot):
                     tasks = await response.json()
                     
                     for task in tasks.get('data', []):
+                        if task['name'] in self.BLACKLISTED_TASKS:
+                            continue
+                            
                         if (task['task_user'] is None or 
                             (task['task_user'].get('reward_amount', 0) == 0 and 
                              task['task_user'].get('repeats', 0) == 0)):
