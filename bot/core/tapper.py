@@ -530,12 +530,15 @@ class TonKombatBot(BaseBot):
                         if 'next_refill' in energy_data:
                             next_refill_str = energy_data['next_refill']
                             if '.' in next_refill_str:
-                                base, fraction = next_refill_str.split('.')
-                                fraction = fraction.split('+')[0][:6]
-                                next_refill_str = f"{base}.{fraction}+00:00"
-                            else:
-                                next_refill_str = next_refill_str.replace('Z', '+00:00')
-                                
+                                main_part, rest = next_refill_str.split('.')
+                                if '+' in rest:
+                                    micro, tz = rest.split('+')
+                                    micro = micro[:6]
+                                    next_refill_str = f"{main_part}.{micro}+{tz}"
+                                else:
+                                    micro = rest[:6]
+                                    next_refill_str = f"{main_part}.{micro}+00:00"
+                            
                             next_refill = datetime.fromisoformat(next_refill_str)
                             
                             return {
@@ -936,9 +939,14 @@ class TonKombatBot(BaseBot):
                         if 'end_time' in hunting_data:
                             end_time_str = hunting_data['end_time'].replace('Z', '+00:00')
                             if '.' in end_time_str:
-                                base, fraction = end_time_str.split('.')
-                                fraction = fraction.split('+')[0][:6]
-                                end_time_str = f"{base}.{fraction}+00:00"
+                                main_part, rest = end_time_str.split('.')
+                                if '+' in rest:
+                                    micro, tz = rest.split('+')
+                                    micro = micro[:6]
+                                    end_time_str = f"{main_part}.{micro}+{tz}"
+                                else:
+                                    micro = rest[:6]
+                                    end_time_str = f"{main_part}.{micro}+00:00"
                             
                             end_time = datetime.fromisoformat(end_time_str)
                             now = datetime.now(timezone.utc)
@@ -1670,7 +1678,7 @@ class TonKombatBot(BaseBot):
                     return result.get('data')
         except Exception as e:
             logger.error(self.log_message(
-                f"Ошибка при получении списка медалей: {e}",
+                f"Error getting medal list: {e}",
                 'error'
             ))
             return None
@@ -1697,14 +1705,14 @@ class TonKombatBot(BaseBot):
                     
                     if result and 'data' in result:
                         logger.success(self.log_message(
-                            f"Успешно получена медаль: {medal_type}",
+                            f"Successfully claimed medal: {medal_type}",
                             'reward'
                         ))
                         return True
                     return False
         except Exception as e:
             logger.error(self.log_message(
-                f"Ошибка при получении медали {medal_type}: {e}",
+                f"Error claiming medal {medal_type}: {e}",
                 'error'
             ))
             return False
