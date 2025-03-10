@@ -559,8 +559,112 @@ class TonKombatBot(BaseBot):
             ))
             return None
 
+    async def get_equipments(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/equipments/me'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    return result.get('data', [])
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error getting equipments: {e}",
+                'error'
+            ))
+            return None
+
+    async def get_equipped_items(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/equipments/equipped'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    return result.get('data', [])
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error getting equipped items: {e}",
+                'error'
+            ))
+            return None
+
+    async def equip_item(self, query: str, item_id: str) -> bool:
+        await self.add_request_delay()
+        url = f'https://liyue.tonkombat.com/api/v1/equipments/{item_id}/equip'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    if result.get('data') is True:
+                        logger.success(self.log_message(
+                            f"Successfully equipped item {item_id}",
+                            'info'
+                        ))
+                        return True
+                    return False
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error equipping item {item_id}: {e}",
+                'error'
+            ))
+            return False
+
+    async def check_and_equip_items(self, query: str) -> None:
+        equipped_items = await self.get_equipped_items(query)
+        if equipped_items is None:
+            return
+            
+        all_items = await self.get_equipments(query)
+        if all_items is None:
+            return
+            
+        equipped_types = {item['type'] for item in equipped_items}
+        
+        for item in all_items:
+            if item['type'] not in equipped_types and item['status'] == 'inventory':
+                await self.equip_item(query, item['id'])
+                equipped_types.add(item['type'])
+
     async def combats_me(self, query: str) -> None:
         await self.add_request_delay()
+        
+        # Проверяем и экипируем предметы перед боем
+        await self.check_and_equip_items(query)
+        
         url = 'https://liyue.tonkombat.com/api/v1/combats/me'
         headers = {
             **self.headers,
@@ -942,7 +1046,7 @@ class TonKombatBot(BaseBot):
                         status = hunting_data.get('status', 'unknown')
                         
                         if 'end_time' in hunting_data:
-                            end_time_str = hunting_data['end_time'].replace('Z', '+00:00')
+                            end_time_str = hunting_data['end_time']
                             if '.' in end_time_str:
                                 main_part, rest = end_time_str.split('.')
                                 if '+' in rest:
@@ -952,6 +1056,8 @@ class TonKombatBot(BaseBot):
                                 else:
                                     micro = rest[:6]
                                     end_time_str = f"{main_part}.{micro}+00:00"
+                            else:
+                                end_time_str = end_time_str.replace('Z', '+00:00')
                             
                             end_time = datetime.fromisoformat(end_time_str)
                             now = datetime.now(timezone.utc)
