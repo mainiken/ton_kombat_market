@@ -190,6 +190,8 @@ class BaseBot:
         
         await self.check_and_claim_medals(self._init_data)
         
+        await self.check_and_claim_equipment(self._init_data)
+        
         await self.tasks_progresses(self._init_data)
         
         await self.check_and_join_tournament(self._init_data)
@@ -255,12 +257,21 @@ class TonKombatBot(BaseBot):
         'task': '📋',
         'upgrade': '⬆️',
         'pet': '🐾',
-        'onboard': '🎮'
+        'onboard': '🎮',
+        'equipment': '🗡️'
     }
 
     BLACKLISTED_TASKS = {
         'Join Crypto Garden',
         'Join Our Community'
+    }
+    
+    EQUIPMENT_TO_CHECK = {
+        'sword-welcome',
+        'key-ss2-reward',
+        'wings-hamster',
+        'shield-queen-gift',
+        'halloween-happy-bird'
     }
     
     MAX_UPGRADE_LEVELS = {
@@ -280,6 +291,7 @@ class TonKombatBot(BaseBot):
         self.auto_hunting = True
         self.user_level = 1
         self.is_onboarded = False
+        self.claimed_equipment = set()
         
         self.headers = {
             'Host': 'liyue.tonkombat.com',
@@ -313,6 +325,7 @@ class TonKombatBot(BaseBot):
                 async with session.get(
                     url=url, 
                     headers=headers, 
+                    ssl=False,
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     response.raise_for_status()
@@ -1866,4 +1879,74 @@ class TonKombatBot(BaseBot):
         for medal in medals:
             if medal['status'] == 'claimable':
                 await self.claim_medal(query, medal['type'])
+                await asyncio.sleep(uniform(1, 2))
+
+    async def check_equipment_status(self, query: str, equipment_id: str) -> Optional[str]:
+        await self.add_request_delay()
+        url = f'https://liyue.tonkombat.com/api/v1/equipments/{equipment_id}/status'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    return result.get('data')
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error checking equipment status for {equipment_id}: {e}",
+                'error'
+            ))
+            return None
+
+    async def claim_equipment(self, query: str, equipment_id: str) -> bool:
+        await self.add_request_delay()
+        url = f'https://liyue.tonkombat.com/api/v1/equipments/{equipment_id}/claim'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}',
+            'Content-Length': '0'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    
+                    if result.get('data') is True:
+                        logger.success(self.log_message(
+                            f"Successfully claimed equipment: {equipment_id}",
+                            'equipment'
+                        ))
+                        self.claimed_equipment.add(equipment_id)
+                        return True
+                    return False
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error claiming equipment {equipment_id}: {e}",
+                'error'
+            ))
+            return False
+
+    async def check_and_claim_equipment(self, query: str) -> None:
+        equipment_to_check = self.EQUIPMENT_TO_CHECK - self.claimed_equipment
+        
+        for equipment_id in equipment_to_check:
+            status = await self.check_equipment_status(query, equipment_id)
+            if status == 'claimable':
+                await self.claim_equipment(query, equipment_id)
                 await asyncio.sleep(uniform(1, 2))
