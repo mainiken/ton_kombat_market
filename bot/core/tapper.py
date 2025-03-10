@@ -48,7 +48,12 @@ class BaseBot:
     def get_ref_id(self) -> str:
         if self._current_ref_id is None:
             random_number = randint(1, 100)
-            self._current_ref_id = settings.REF_ID if random_number <= 70 else '252453226_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b'
+            ref_id = settings.REF_ID if random_number <= 70 else '252453226_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b'
+            
+            if random_number <= 70 and '_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b' not in ref_id:
+                ref_id = f"{ref_id}_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b"
+                
+            self._current_ref_id = ref_id
         return self._current_ref_id
 
     async def get_tg_web_data(self, app_name: str = "Ton_kombat_bot", path: str = "app") -> str:
