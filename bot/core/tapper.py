@@ -1068,7 +1068,7 @@ class TonKombatBot(BaseBot):
             hunting_data = await self.hunting_status(query)
             
         if hunting_data and 'time_left' in hunting_data:
-            sleep_time = min(hunting_data['time_left'], 14400) 
+            sleep_time = (min(hunting_data['time_left'], 14400))+randint(0, 3600)
             logger.info(self.log_message(
                 f"Going to sleep for {int(sleep_time/3600)}h {int((sleep_time%3600)/60)}m",
                 'hunt'
