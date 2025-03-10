@@ -188,6 +188,8 @@ class BaseBot:
         
         await self.check_and_join_guild(self._init_data)
         
+        await self.check_and_claim_medals(self._init_data)
+        
         await self.tasks_progresses(self._init_data)
         
         await self.check_and_join_tournament(self._init_data)
@@ -1048,8 +1050,8 @@ class TonKombatBot(BaseBot):
                     
                     if result and 'data' in result:
                         reward_data = result['data']
-                        stars = float(reward_data.get('stars', 0) / 1000000000)
-                        tok = float(reward_data.get('reward_tok', 0) / 1000000000)
+                        stars = float(reward_data.get('stars', 0)) / 1000000000
+                        tok = float(reward_data.get('reward_tok', 0)) / 1000000000
                         demons_killed = reward_data.get('total_demon_killed', 0)
                         
                         logger.success(self.log_message(
@@ -1642,3 +1644,73 @@ class TonKombatBot(BaseBot):
                 'error'
             ))
             return False
+
+    async def get_medals(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/medals'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    return result.get('data')
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Ошибка при получении списка медалей: {e}",
+                'error'
+            ))
+            return None
+
+    async def claim_medal(self, query: str, medal_type: str) -> bool:
+        await self.add_request_delay()
+        url = f'https://liyue.tonkombat.com/api/v1/medals/{medal_type}'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}',
+            'Content-Length': '0'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    
+                    if result and 'data' in result:
+                        logger.success(self.log_message(
+                            f"Успешно получена медаль: {medal_type}",
+                            'reward'
+                        ))
+                        return True
+                    return False
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Ошибка при получении медали {medal_type}: {e}",
+                'error'
+            ))
+            return False
+
+    async def check_and_claim_medals(self, query: str) -> None:
+        medals = await self.get_medals(query)
+        if not medals:
+            return
+            
+        for medal in medals:
+            if medal['status'] == 'claimable':
+                await self.claim_medal(query, medal['type'])
+                await asyncio.sleep(uniform(1, 2))
