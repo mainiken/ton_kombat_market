@@ -283,7 +283,11 @@ class TonKombatBot(BaseBot):
         emoji = self.EMOJI.get(emoji_key, '')
         return f"{self.session_name} | {emoji} {message}"
         
+    async def add_request_delay(self) -> None:
+        await asyncio.sleep(uniform(2, 4))
+
     async def get_user_info(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/users/me'
         headers = {
             **self.headers,
@@ -327,6 +331,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def users_balance(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/users/balance'
         headers = {
             **self.headers,
@@ -351,6 +356,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def users_claim(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/users/claim'
         headers = {
             **self.headers,
@@ -396,6 +402,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def users_stars_spend(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/users/stars/spend'
         data = json.dumps({'type': 'upgrade-army-rank'})
         headers = {
@@ -442,6 +449,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def daily(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/daily'
         headers = {
             **self.headers,
@@ -487,6 +495,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def get_energy_info(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/combats/energy'
         headers = {
             **self.headers,
@@ -510,9 +519,15 @@ class TonKombatBot(BaseBot):
                         max_energy = energy_data.get('max_energy', 20)
                         
                         if 'next_refill' in energy_data:
-                            next_refill = datetime.fromisoformat(
-                                energy_data['next_refill'].replace('Z', '+00:00')
-                            ).astimezone(timezone.utc)
+                            next_refill_str = energy_data['next_refill']
+                            if '.' in next_refill_str:
+                                base, fraction = next_refill_str.split('.')
+                                fraction = fraction.split('+')[0][:6]
+                                next_refill_str = f"{base}.{fraction}+00:00"
+                            else:
+                                next_refill_str = next_refill_str.replace('Z', '+00:00')
+                                
+                            next_refill = datetime.fromisoformat(next_refill_str)
                             
                             return {
                                 'current_energy': current_energy,
@@ -528,6 +543,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def combats_me(self, query: str) -> None:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/combats/me'
         headers = {
             **self.headers,
@@ -557,6 +573,7 @@ class TonKombatBot(BaseBot):
             ))
 
     async def combats_pets_skill(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/combats/pets/skill'
         headers = {
             **self.headers,
@@ -594,6 +611,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def combats_find(self, query: str) -> None:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/combats/find'
         headers = {
             **self.headers,
@@ -625,6 +643,7 @@ class TonKombatBot(BaseBot):
             ))
 
     async def combats_fight(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/combats/fight'
         headers = {
             **self.headers,
@@ -686,6 +705,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def season_start(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/season/start'
         headers = {
             **self.headers,
@@ -732,6 +752,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def season_me(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/season/me'
         headers = {
             **self.headers,
@@ -773,6 +794,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def season_reward_info(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/season/reward'
         headers = {
             **self.headers,
@@ -817,6 +839,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def season_reward_claim(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/season/reward'
         headers = {
             **self.headers,
@@ -864,6 +887,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def hunting_status(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/hunting/me/hunting'
         headers = {
             **self.headers,
@@ -937,6 +961,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def hunting_start(self, query: str, pool_slug: str = "cursed-fortress") -> bool:
+        await self.add_request_delay()
         url = f'https://liyue.tonkombat.com/api/v1/hunting/start/{pool_slug}'
         headers = {
             **self.headers,
@@ -982,6 +1007,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def hunting_claim(self, query: str, pool_slug: str = "cursed-fortress") -> bool:
+        await self.add_request_delay()
         url = f'https://liyue.tonkombat.com/api/v1/hunting/claim/{pool_slug}'
         headers = {
             **self.headers,
@@ -1051,6 +1077,7 @@ class TonKombatBot(BaseBot):
         await asyncio.sleep(uniform(2, 5))
 
     async def tasks_progresses(self, query: str) -> None:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/tasks/progresses'
         headers = {
             **self.headers,
@@ -1081,6 +1108,7 @@ class TonKombatBot(BaseBot):
             ))
 
     async def tasks_execute(self, query: str, task_id: str, task_name: str) -> bool:
+        await self.add_request_delay()
         url = f'https://liyue.tonkombat.com/api/v1/tasks/{task_id}'
         headers = {
             **self.headers,
@@ -1110,6 +1138,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def tournament_daily_status(self, query: str) -> Optional[str]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/tournament/daily/me'
         headers = {
             **self.headers,
@@ -1148,6 +1177,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def tournament_register(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/tournament/register'
         headers = {
             **self.headers,
@@ -1193,6 +1223,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def tournament_reward(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/tournament/reward'
         headers = {
             **self.headers,
@@ -1267,6 +1298,7 @@ class TonKombatBot(BaseBot):
             await self.tournament_reward(query)
 
     async def partners_balance(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/partners/balance'
         headers = {
             **self.headers,
@@ -1302,10 +1334,7 @@ class TonKombatBot(BaseBot):
             return None
 
     async def partners_claim_reward(self, query: str) -> bool:
-        balance_data = await self.partners_balance(query)
-        if not balance_data or float(balance_data.get('reward_tok', 0)) <= 0:
-            return False
-
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/partners/claim-reward'
         headers = {
             **self.headers,
@@ -1340,6 +1369,7 @@ class TonKombatBot(BaseBot):
                     result = await response.json()
                     
                     if result and result.get('data') is True:
+                        balance_data = await self.partners_balance(query)
                         reward_amount = float(
                             balance_data.get('reward_tok', 0) / 1000000000
                         )
@@ -1356,6 +1386,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def upgrades(self, query: str, upgrade_type: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/upgrades'
         data = json.dumps({'type': upgrade_type})
         headers = {
@@ -1404,6 +1435,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def check_and_do_upgrades(self, query: str) -> None:
+        await self.add_request_delay()
         upgrade_types = ['mining-tok', 'pocket-size']
         
         balance = await self.users_balance(query)
@@ -1434,6 +1466,7 @@ class TonKombatBot(BaseBot):
                 await asyncio.sleep(uniform(1, 3))
 
     async def check_onboard_status(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/users/me'
         headers = {
             **self.headers,
@@ -1453,6 +1486,7 @@ class TonKombatBot(BaseBot):
             return False
 
     async def perform_onboarding(self, query: str) -> bool:
+        await self.add_request_delay()
         url = 'https://liyue.tonkombat.com/api/v1/users/onboard'
         data = json.dumps({'house_id': 0})
         headers = {
