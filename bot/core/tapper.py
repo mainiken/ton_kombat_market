@@ -1077,17 +1077,17 @@ class TonKombatBot(BaseBot):
                         
                         if 'end_time' in hunting_data:
                             end_time_str = hunting_data['end_time']
+                            if 'Z' in end_time_str:
+                                end_time_str = end_time_str.replace('Z', '+00:00')
                             if '.' in end_time_str:
                                 main_part, rest = end_time_str.split('.')
                                 if '+' in rest:
-                                    micro, tz = rest.split('+')
+                                    micro, tz = rest.split('+', 1)
                                     micro = micro[:6]
                                     end_time_str = f"{main_part}.{micro}+{tz}"
                                 else:
                                     micro = rest[:6]
                                     end_time_str = f"{main_part}.{micro}+00:00"
-                            else:
-                                end_time_str = end_time_str.replace('Z', '+00:00')
                             
                             end_time = datetime.fromisoformat(end_time_str)
                             now = datetime.now(timezone.utc)
@@ -1620,9 +1620,6 @@ class TonKombatBot(BaseBot):
             current_level = user_info['data'].get(f'{upgrade_type}_level', 0)
             
             if current_level >= max_level:
-                logger.debug(self.log_message(
-                    f"Maximum level ({max_level}) reached for {upgrade_type}"
-                ))
                 continue
                 
             max_attempts = randint(1, 3)
