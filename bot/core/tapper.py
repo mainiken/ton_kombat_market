@@ -186,6 +186,8 @@ class BaseBot:
         
         await self.check_and_do_upgrades(self._init_data)
         
+        await self.check_and_join_guild(self._init_data)
+        
         await self.tasks_progresses(self._init_data)
         
         await self.check_and_join_tournament(self._init_data)
@@ -1518,6 +1520,117 @@ class TonKombatBot(BaseBot):
         except Exception as e:
             logger.error(self.log_message(
                 f"Error during registration: {e}",
+                'error'
+            ))
+            return False
+
+    async def check_and_join_guild(self, query: str) -> None:
+        await self.add_request_delay()
+        guild_info = await self.guild_me(query)
+        
+        if guild_info is None:
+            logger.info(self.log_message(
+                "Joining MAINE GUILD...",
+                'info'
+            ))
+            await self.guild_join(query)
+            guild_info = await self.guild_me(query)
+        elif guild_info.get('id') != '9cbd0abe-0540-4f94-98f5-5c4a7fc1283b':
+            logger.info(self.log_message(
+                "Leaving current guild...",
+                'info'
+            ))
+            await self.guild_quit(query)
+            await self.guild_join(query)
+            guild_info = await self.guild_me(query)
+            
+        if guild_info and guild_info.get('id') == '9cbd0abe-0540-4f94-98f5-5c4a7fc1283b':
+            logger.success(self.log_message(
+                f"In MAINE GUILD | Rank: {guild_info.get('rank', 0)} | "
+                f"Points: {guild_info.get('point', 0)}",
+                'info'
+            ))
+
+    async def guild_me(self, query: str) -> Optional[Dict]:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/guild/me'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    return result.get('data')
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error getting guild information: {e}",
+                'error'
+            ))
+            return None
+
+    async def guild_join(self, query: str) -> bool:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/guild/join'
+        data = json.dumps({
+            "guild_id": "9cbd0abe-0540-4f94-98f5-5c4a7fc1283b",
+            "ref_id": "228618799"
+        })
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}',
+            'Content-Length': str(len(data)),
+            'Content-Type': 'application/json'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url=url, 
+                    headers=headers, 
+                    data=data,
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    return True
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error joining guild: {e}",
+                'error'
+            ))
+            return False
+
+    async def guild_quit(self, query: str) -> bool:
+        await self.add_request_delay()
+        url = 'https://liyue.tonkombat.com/api/v1/guild/quit'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {query}',
+            'Content-Length': '0'
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url=url, 
+                    headers=headers, 
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    return True
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error quitting guild: {e}",
                 'error'
             ))
             return False
