@@ -210,10 +210,6 @@ class BaseBot:
             max_energy = energy_info['max_energy']
             next_refill = energy_info.get('next_refill')
             
-            logger.info(self.log_message(
-                f"{current_energy}/{max_energy}",
-                'energy'
-            ))
             
             if current_energy > 0 and self.auto_fight:
                 await self.combats_me(self._init_data)
@@ -773,9 +769,6 @@ class TonKombatBot(BaseBot):
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     if response.status == 400:
-                        logger.debug(self.log_message(
-                            "Pet skill not available"
-                        ))
                         return None
                     elif response.status == 404:
                         logger.warning(self.log_message("Pet not found"))
@@ -952,10 +945,6 @@ class TonKombatBot(BaseBot):
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     if response.status == 404:
-                        logger.debug(self.log_message(
-                            "Season information endpoint unavailable",
-                            'season'
-                        ))
                         return None
                         
                     response.raise_for_status()
@@ -994,9 +983,6 @@ class TonKombatBot(BaseBot):
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     if response.status == 404:
-                        logger.debug(self.log_message(
-                            "Season reward information endpoint unavailable"
-                        ))
                         return None
                         
                     response.raise_for_status()
@@ -1177,22 +1163,10 @@ class TonKombatBot(BaseBot):
                         response_json = await response.json()
                         error_message = response_json.get('message', '')
                         if 'user is hunting' in error_message:
-                            logger.debug(self.log_message(
-                                "User is already hunting",
-                                'hunt'
-                            ))
                             return False
                         else:
-                            logger.debug(self.log_message(
-                                f"Error starting hunting: {error_message}",
-                                'hunt'
-                            ))
                             return False
                     elif response.status == 404:
-                        logger.debug(self.log_message(
-                            "Hunting start endpoint unavailable",
-                            'hunt'
-                        ))
                         return False
                     
                     response.raise_for_status()
@@ -1237,9 +1211,6 @@ class TonKombatBot(BaseBot):
                         ))
                         return False
                     elif response.status == 404:
-                        logger.debug(self.log_message(
-                            "Hunting reward claiming endpoint unavailable"
-                        ))
                         return False
                         
                     response.raise_for_status()
@@ -1276,10 +1247,7 @@ class TonKombatBot(BaseBot):
                 
             hunting_result = await self.hunting_start(query, pool_slug)
             if not hunting_result:
-                logger.debug(self.log_message(
-                    "Failed to start hunting",
-                    'hunt'
-                ))
+                return
             hunting_status = await self.hunting_status(query)
                 
         if hunting_status and 'time_left' in hunting_status:
@@ -1374,9 +1342,6 @@ class TonKombatBot(BaseBot):
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     if response.status == 404:
-                        logger.debug(self.log_message(
-                            "Tournament status endpoint unavailable"
-                        ))
                         return None
                         
                     response.raise_for_status()
@@ -1421,9 +1386,6 @@ class TonKombatBot(BaseBot):
                         ))
                         return False
                     elif response.status == 404:
-                        logger.debug(self.log_message(
-                            "Tournament registration endpoint unavailable"
-                        ))
                         return False
                         
                     response.raise_for_status()
@@ -1629,22 +1591,10 @@ class TonKombatBot(BaseBot):
                         response_json = await response.json()
                         error_message = response_json.get('message', '')
                         if 'not enough tok' in error_message:
-                            logger.debug(self.log_message(
-                                f"Not enough TOK to upgrade {upgrade_type}",
-                                'upgrade'
-                            ))
                             return False
                         elif 'max level exceeded' in error_message:
-                            logger.debug(self.log_message(
-                                f"Maximum level reached for {upgrade_type}",
-                                'upgrade'
-                            ))
                             return False
                         else:
-                            logger.debug(self.log_message(
-                                f"Error upgrading {upgrade_type}: {error_message}",
-                                'upgrade'
-                            ))
                             return False
                     
                     response.raise_for_status()
