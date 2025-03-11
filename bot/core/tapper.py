@@ -333,7 +333,8 @@ class TonKombatBot(BaseBot):
                     
                     if 'data' in result:
                         user = result['data']
-                        self.user_level = user.get('level', 1)
+                        upgrades = user.get('upgrades', [])
+                        self.user_level = len(upgrades) + 3
                         
                         balance = await self.users_balance(query)
                         current_balance = (
@@ -544,51 +545,50 @@ class TonKombatBot(BaseBot):
                         energy_data = result['data']
                         current_energy = energy_data.get('current_energy', 0)
                         max_energy = energy_data.get('max_energy', 20)
+                        next_refill = None
                         
                         if 'next_refill' in energy_data:
                             next_refill_str = energy_data['next_refill']
                             
                             try:
-                                # Обработка различных форматов даты
                                 if 'Z+' in next_refill_str:
                                     next_refill_str = next_refill_str.replace('Z+', '+')
                                 elif 'Z' in next_refill_str:
                                     next_refill_str = next_refill_str.replace('Z', '+00:00')
                                 
-                                # Обработка микросекунд
                                 if '.' in next_refill_str:
                                     parts = next_refill_str.split('.')
                                     main_part = parts[0]
                                     
-                                    # Разделяем дробную часть и часовой пояс
                                     if '+' in parts[1]:
                                         frac_parts = parts[1].split('+', 1)
-                                        micro = frac_parts[0][:6]  # Берем только 6 цифр
+                                        micro = frac_parts[0][:6]
                                         tz = frac_parts[1]
                                         next_refill_str = f"{main_part}.{micro}+{tz}"
                                     else:
-                                        micro = parts[1][:6]  # Берем только 6 цифр
+                                        micro = parts[1][:6]
                                         next_refill_str = f"{main_part}.{micro}+00:00"
                                 elif '+' not in next_refill_str:
                                     next_refill_str = f"{next_refill_str}+00:00"
                                 
                                 next_refill = datetime.fromisoformat(next_refill_str)
-                                now = datetime.now(timezone.utc)
                                 
-                                if next_refill > now:
-                                    time_left = next_refill - now
-                                    hours, remainder = divmod(time_left.seconds, 3600)
-                                    minutes, seconds = divmod(remainder, 60)
-                                    
-                                    logger.info(self.log_message(
-                                        f"Energy: {current_energy}/{max_energy} | Next refill: {hours}h {minutes}m {seconds}s",
-                                        'energy'
-                                    ))
-                                else:
-                                    logger.info(self.log_message(
-                                        f"Energy: {current_energy}/{max_energy} | Refill available",
-                                        'energy'
-                                    ))
+                                if next_refill:
+                                    now = datetime.now(timezone.utc)
+                                    if next_refill > now:
+                                        time_left = next_refill - now
+                                        hours, remainder = divmod(time_left.seconds, 3600)
+                                        minutes, seconds = divmod(remainder, 60)
+                                        
+                                        logger.info(self.log_message(
+                                            f"Energy: {current_energy}/{max_energy} | Next refill: {hours}h {minutes}m {seconds}s",
+                                            'energy'
+                                        ))
+                                    else:
+                                        logger.info(self.log_message(
+                                            f"Energy: {current_energy}/{max_energy} | Refill available",
+                                            'energy'
+                                        ))
                             except ValueError as e:
                                 logger.error(self.log_message(
                                     f"Error parsing date: {next_refill_str} - {e}",
@@ -598,16 +598,13 @@ class TonKombatBot(BaseBot):
                                     f"Energy: {current_energy}/{max_energy}",
                                     'energy'
                                 ))
-                                # Если не удалось распарсить дату, создаем фиктивную дату в будущем
                                 next_refill = datetime.now(timezone.utc) + timedelta(hours=1)
                         else:
                             logger.info(self.log_message(
                                 f"Energy: {current_energy}/{max_energy}",
                                 'energy'
                             ))
-                            next_refill = None
                         
-                        # Возвращаем структурированные данные с max_energy
                         return {
                             'current_energy': current_energy,
                             'max_energy': max_energy,
@@ -1129,54 +1126,51 @@ class TonKombatBot(BaseBot):
                             end_time_str = hunting_data['end_time']
                             
                             try:
-                                # Обработка различных форматов даты
                                 if 'Z+' in end_time_str:
                                     end_time_str = end_time_str.replace('Z+', '+')
                                 elif 'Z' in end_time_str:
                                     end_time_str = end_time_str.replace('Z', '+00:00')
                                 
-                                # Обработка микросекунд
                                 if '.' in end_time_str:
                                     parts = end_time_str.split('.')
                                     main_part = parts[0]
                                     
-                                    # Разделяем дробную часть и часовой пояс
                                     if '+' in parts[1]:
                                         frac_parts = parts[1].split('+', 1)
-                                        micro = frac_parts[0][:6]  # Берем только 6 цифр
+                                        micro = frac_parts[0][:6]
                                         tz = frac_parts[1]
                                         end_time_str = f"{main_part}.{micro}+{tz}"
                                     else:
-                                        micro = parts[1][:6]  # Берем только 6 цифр
+                                        micro = parts[1][:6]
                                         end_time_str = f"{main_part}.{micro}+00:00"
                                 elif '+' not in end_time_str:
                                     end_time_str = f"{end_time_str}+00:00"
                                 
                                 end_time = datetime.fromisoformat(end_time_str)
-                                now = datetime.now(timezone.utc)
                                 
-                                if end_time > now:
-                                    time_left = end_time - now
-                                    hours, remainder = divmod(time_left.seconds, 3600)
-                                    minutes, seconds = divmod(remainder, 60)
-                                    logger.info(self.log_message(
-                                        f"Hunting: {pool_slug} | {hours}h {minutes}m {seconds}s",
-                                        'hunt'
-                                    ))
-                                    return {**hunting_data, 'time_left': time_left.total_seconds()}
-                                else:
-                                    logger.info(self.log_message(
-                                        f"Hunting finished: {pool_slug}",
-                                        'hunt'
-                                    ))
-                                    await self.hunting_claim(query, pool_slug)
-                                    return None
+                                if end_time:
+                                    now = datetime.now(timezone.utc)
+                                    if end_time > now:
+                                        time_left = end_time - now
+                                        hours, remainder = divmod(time_left.seconds, 3600)
+                                        minutes, seconds = divmod(remainder, 60)
+                                        logger.info(self.log_message(
+                                            f"Hunting: {pool_slug} | {hours}h {minutes}m {seconds}s",
+                                            'hunt'
+                                        ))
+                                        return {**hunting_data, 'time_left': time_left.total_seconds()}
+                                    else:
+                                        logger.info(self.log_message(
+                                            f"Hunting finished: {pool_slug}",
+                                            'hunt'
+                                        ))
+                                        await self.hunting_claim(query, pool_slug)
+                                        return None
                             except ValueError as e:
                                 logger.error(self.log_message(
                                     f"Error parsing date: {end_time_str} - {e}",
                                     'error'
                                 ))
-                                # Если не удалось распарсить дату, просто возвращаем данные как есть
                                 logger.info(self.log_message(
                                     f"Hunting: {pool_slug} | {status}",
                                     'hunt'
@@ -1308,23 +1302,30 @@ class TonKombatBot(BaseBot):
         hunting_status = await self.hunting_status(query)
         
         if hunting_status is None:
-            hunting_result = await self.hunting_start(query)
+            # Выбираем локацию на основе уровня
+            pool_slug = "cursed-fortress"  # Базовая локация
+            if self.user_level >= 25:
+                pool_slug = "eternal-abyss-gate"
+            elif self.user_level >= 15:
+                pool_slug = "demonbane-keep"
+                
+            hunting_result = await self.hunting_start(query, pool_slug)
             if not hunting_result:
                 logger.debug(self.log_message(
-                    "Failed to start hunting",
+                    "Не удалось начать охоту",
                     'hunt'
                 ))
             hunting_status = await self.hunting_status(query)
-            
+                
         if hunting_status and 'time_left' in hunting_status:
             sleep_time = (min(hunting_status['time_left'], 14400))+randint(0, 3600)
             logger.info(self.log_message(
-                f"Going to sleep for {int(sleep_time/3600)}h {int((sleep_time%3600)/60)}m",
+                f"Засыпаю на {int(sleep_time/3600)}ч {int((sleep_time%3600)/60)}м",
                 'hunt'
             ))
             await asyncio.sleep(sleep_time)
             await self.hunting_status(query)
-            
+                
         await asyncio.sleep(uniform(2, 5))
 
     async def tasks_progresses(self, query: str) -> None:
