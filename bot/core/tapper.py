@@ -1235,6 +1235,27 @@ class TonKombatBot(BaseBot):
             ))
             return False
 
+    async def refresh_authorization(self) -> bool:
+        try:
+            self._init_data = await self.get_tg_web_data()
+            self.access_token_created_time = time()
+            
+            if not await self.check_onboard_status(self._init_data):
+                if not await self.perform_onboarding(self._init_data):
+                    return False
+                    
+            user_info = await self.get_user_info(self._init_data)
+            if not user_info:
+                return False
+                
+            return True
+        except Exception as e:
+            logger.error(self.log_message(
+                f"Error refreshing authorization: {e}",
+                'error'
+            ))
+            return False
+
     async def check_and_start_hunting(self, query: str) -> None:
         hunting_status = await self.hunting_status(query)
         
@@ -1257,6 +1278,14 @@ class TonKombatBot(BaseBot):
                 'hunt'
             ))
             await asyncio.sleep(sleep_time)
+            
+            if not await self.refresh_authorization():
+                logger.error(self.log_message(
+                    "Failed to refresh authorization after sleep",
+                    'error'
+                ))
+                return
+                
             await self.hunting_status(query)
                 
         await asyncio.sleep(uniform(2, 5))
