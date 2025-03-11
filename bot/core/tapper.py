@@ -7,7 +7,7 @@ from aiohttp_proxy import ProxyConnector
 from better_proxy import Proxy
 from random import uniform, randint
 from time import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import os
 
@@ -548,22 +548,30 @@ class TonKombatBot(BaseBot):
                         if 'next_refill' in energy_data:
                             next_refill_str = energy_data['next_refill']
                             
-                            if 'Z+' in next_refill_str:
-                                next_refill_str = next_refill_str.replace('Z+', '+')
-                            elif 'Z' in next_refill_str:
-                                next_refill_str = next_refill_str.replace('Z', '+00:00')
-                                
-                            if '.' in next_refill_str:
-                                main_part, rest = next_refill_str.split('.')
-                                if '+' in rest:
-                                    micro, tz = rest.split('+', 1)
-                                    micro = micro[:6]
-                                    next_refill_str = f"{main_part}.{micro}+{tz}"
-                                else:
-                                    micro = rest[:6]
-                                    next_refill_str = f"{main_part}.{micro}+00:00"
-                            
                             try:
+                                # Обработка различных форматов даты
+                                if 'Z+' in next_refill_str:
+                                    next_refill_str = next_refill_str.replace('Z+', '+')
+                                elif 'Z' in next_refill_str:
+                                    next_refill_str = next_refill_str.replace('Z', '+00:00')
+                                
+                                # Обработка микросекунд
+                                if '.' in next_refill_str:
+                                    parts = next_refill_str.split('.')
+                                    main_part = parts[0]
+                                    
+                                    # Разделяем дробную часть и часовой пояс
+                                    if '+' in parts[1]:
+                                        frac_parts = parts[1].split('+', 1)
+                                        micro = frac_parts[0][:6]  # Берем только 6 цифр
+                                        tz = frac_parts[1]
+                                        next_refill_str = f"{main_part}.{micro}+{tz}"
+                                    else:
+                                        micro = parts[1][:6]  # Берем только 6 цифр
+                                        next_refill_str = f"{main_part}.{micro}+00:00"
+                                elif '+' not in next_refill_str:
+                                    next_refill_str = f"{next_refill_str}+00:00"
+                                
                                 next_refill = datetime.fromisoformat(next_refill_str)
                                 now = datetime.now(timezone.utc)
                                 
@@ -586,16 +594,24 @@ class TonKombatBot(BaseBot):
                                     f"Error parsing date: {next_refill_str} - {e}",
                                     'error'
                                 ))
+                                logger.info(self.log_message(
+                                    f"Energy: {current_energy}/{max_energy}",
+                                    'energy'
+                                ))
+                                # Если не удалось распарсить дату, создаем фиктивную дату в будущем
+                                next_refill = datetime.now(timezone.utc) + timedelta(hours=1)
                         else:
                             logger.info(self.log_message(
                                 f"Energy: {current_energy}/{max_energy}",
                                 'energy'
                             ))
+                            next_refill = None
                         
+                        # Возвращаем структурированные данные с max_energy
                         return {
                             'current_energy': current_energy,
                             'max_energy': max_energy,
-                            'next_refill': next_refill if 'next_refill' in locals() else None,
+                            'next_refill': next_refill,
                             **energy_data
                         }
                     return None
@@ -1112,22 +1128,30 @@ class TonKombatBot(BaseBot):
                         if 'end_time' in hunting_data:
                             end_time_str = hunting_data['end_time']
                             
-                            if 'Z+' in end_time_str:
-                                end_time_str = end_time_str.replace('Z+', '+')
-                            elif 'Z' in end_time_str:
-                                end_time_str = end_time_str.replace('Z', '+00:00')
-                                
-                            if '.' in end_time_str:
-                                main_part, rest = end_time_str.split('.')
-                                if '+' in rest:
-                                    micro, tz = rest.split('+', 1)
-                                    micro = micro[:6]
-                                    end_time_str = f"{main_part}.{micro}+{tz}"
-                                else:
-                                    micro = rest[:6]
-                                    end_time_str = f"{main_part}.{micro}+00:00"
-                            
                             try:
+                                # Обработка различных форматов даты
+                                if 'Z+' in end_time_str:
+                                    end_time_str = end_time_str.replace('Z+', '+')
+                                elif 'Z' in end_time_str:
+                                    end_time_str = end_time_str.replace('Z', '+00:00')
+                                
+                                # Обработка микросекунд
+                                if '.' in end_time_str:
+                                    parts = end_time_str.split('.')
+                                    main_part = parts[0]
+                                    
+                                    # Разделяем дробную часть и часовой пояс
+                                    if '+' in parts[1]:
+                                        frac_parts = parts[1].split('+', 1)
+                                        micro = frac_parts[0][:6]  # Берем только 6 цифр
+                                        tz = frac_parts[1]
+                                        end_time_str = f"{main_part}.{micro}+{tz}"
+                                    else:
+                                        micro = parts[1][:6]  # Берем только 6 цифр
+                                        end_time_str = f"{main_part}.{micro}+00:00"
+                                elif '+' not in end_time_str:
+                                    end_time_str = f"{end_time_str}+00:00"
+                                
                                 end_time = datetime.fromisoformat(end_time_str)
                                 now = datetime.now(timezone.utc)
                                 
@@ -1151,6 +1175,11 @@ class TonKombatBot(BaseBot):
                                 logger.error(self.log_message(
                                     f"Error parsing date: {end_time_str} - {e}",
                                     'error'
+                                ))
+                                # Если не удалось распарсить дату, просто возвращаем данные как есть
+                                logger.info(self.log_message(
+                                    f"Hunting: {pool_slug} | {status}",
+                                    'hunt'
                                 ))
                                 return hunting_data
                         else:
