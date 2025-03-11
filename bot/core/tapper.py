@@ -592,7 +592,6 @@ class TonKombatBot(BaseBot):
                                 'energy'
                             ))
                         
-                        # Возвращаем структурированные данные с max_energy
                         return {
                             'current_energy': current_energy,
                             'max_energy': max_energy,
