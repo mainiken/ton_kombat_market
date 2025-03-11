@@ -402,7 +402,7 @@ class TonKombatBot(BaseBot):
                     if response.status == 400:
                         error_data = await response.json()
                         if error_data.get('message') == 'claim too early':
-                            logger.debug(self.log_message(
+                            logger.info(self.log_message(
                                 "Mining reward not available yet"
                             ))
                             return True
@@ -451,7 +451,7 @@ class TonKombatBot(BaseBot):
                     if response.status == 400:
                         error_data = await response.json()
                         if error_data.get('message') == 'not enough stars to upgrade':
-                            logger.debug(self.log_message(
+                            logger.info(self.log_message(
                                 "Not enough stars to upgrade rank"
                             ))
                             return True
@@ -495,7 +495,7 @@ class TonKombatBot(BaseBot):
                     if response.status == 400:
                         error_data = await response.json()
                         if error_data.get('message') == 'already claimed for today':
-                            logger.debug(self.log_message(
+                            logger.info(self.log_message(
                                 "Daily bonus already claimed"
                             ))
                             return True
@@ -547,27 +547,62 @@ class TonKombatBot(BaseBot):
                         
                         if 'next_refill' in energy_data:
                             next_refill_str = energy_data['next_refill']
+                            
+                            if 'Z+' in next_refill_str:
+                                next_refill_str = next_refill_str.replace('Z+', '+')
+                            elif 'Z' in next_refill_str:
+                                next_refill_str = next_refill_str.replace('Z', '+00:00')
+                                
                             if '.' in next_refill_str:
                                 main_part, rest = next_refill_str.split('.')
                                 if '+' in rest:
-                                    micro, tz = rest.split('+')
+                                    micro, tz = rest.split('+', 1)
                                     micro = micro[:6]
                                     next_refill_str = f"{main_part}.{micro}+{tz}"
                                 else:
                                     micro = rest[:6]
                                     next_refill_str = f"{main_part}.{micro}+00:00"
                             
-                            next_refill = datetime.fromisoformat(next_refill_str)
-                            
-                            return {
-                                'current_energy': current_energy,
-                                'max_energy': max_energy,
-                                'next_refill': next_refill
-                            }
+                            try:
+                                next_refill = datetime.fromisoformat(next_refill_str)
+                                now = datetime.now(timezone.utc)
+                                
+                                if next_refill > now:
+                                    time_left = next_refill - now
+                                    hours, remainder = divmod(time_left.seconds, 3600)
+                                    minutes, seconds = divmod(remainder, 60)
+                                    
+                                    logger.info(self.log_message(
+                                        f"Energy: {current_energy}/{max_energy} | Next refill: {hours}h {minutes}m {seconds}s",
+                                        'energy'
+                                    ))
+                                else:
+                                    logger.info(self.log_message(
+                                        f"Energy: {current_energy}/{max_energy} | Refill available",
+                                        'energy'
+                                    ))
+                            except ValueError as e:
+                                logger.error(self.log_message(
+                                    f"Error parsing date: {next_refill_str} - {e}",
+                                    'error'
+                                ))
+                        else:
+                            logger.info(self.log_message(
+                                f"Energy: {current_energy}/{max_energy}",
+                                'energy'
+                            ))
+                        
+                        # Возвращаем структурированные данные с max_energy
+                        return {
+                            'current_energy': current_energy,
+                            'max_energy': max_energy,
+                            'next_refill': next_refill if 'next_refill' in locals() else None,
+                            **energy_data
+                        }
                     return None
         except Exception as e:
             logger.error(self.log_message(
-                f"Error getting energy information: {e}",
+                f"Error getting energy info: {e}",
                 'error'
             ))
             return None
@@ -1077,8 +1112,12 @@ class TonKombatBot(BaseBot):
                         
                         if 'end_time' in hunting_data:
                             end_time_str = hunting_data['end_time']
-                            if 'Z' in end_time_str:
+                            
+                            if 'Z+' in end_time_str:
+                                end_time_str = end_time_str.replace('Z+', '+')
+                            elif 'Z' in end_time_str:
                                 end_time_str = end_time_str.replace('Z', '+00:00')
+                                
                             if '.' in end_time_str:
                                 main_part, rest = end_time_str.split('.')
                                 if '+' in rest:
@@ -1089,25 +1128,32 @@ class TonKombatBot(BaseBot):
                                     micro = rest[:6]
                                     end_time_str = f"{main_part}.{micro}+00:00"
                             
-                            end_time = datetime.fromisoformat(end_time_str)
-                            now = datetime.now(timezone.utc)
-                            
-                            if end_time > now:
-                                time_left = end_time - now
-                                hours, remainder = divmod(time_left.seconds, 3600)
-                                minutes, seconds = divmod(remainder, 60)
-                                logger.info(self.log_message(
-                                    f"Hunting: {pool_slug} | {hours}h {minutes}m {seconds}s",
-                                    'hunt'
+                            try:
+                                end_time = datetime.fromisoformat(end_time_str)
+                                now = datetime.now(timezone.utc)
+                                
+                                if end_time > now:
+                                    time_left = end_time - now
+                                    hours, remainder = divmod(time_left.seconds, 3600)
+                                    minutes, seconds = divmod(remainder, 60)
+                                    logger.info(self.log_message(
+                                        f"Hunting: {pool_slug} | {hours}h {minutes}m {seconds}s",
+                                        'hunt'
+                                    ))
+                                    return {**hunting_data, 'time_left': time_left.total_seconds()}
+                                else:
+                                    logger.info(self.log_message(
+                                        f"Hunting finished: {pool_slug}",
+                                        'hunt'
+                                    ))
+                                    await self.hunting_claim(query, pool_slug)
+                                    return None
+                            except ValueError as e:
+                                logger.error(self.log_message(
+                                    f"Error parsing date: {end_time_str} - {e}",
+                                    'error'
                                 ))
-                                return {**hunting_data, 'time_left': time_left.total_seconds()}
-                            else:
-                                logger.info(self.log_message(
-                                    f"Hunting finished: {pool_slug}",
-                                    'hunt'
-                                ))
-                                await self.hunting_claim(query, pool_slug)
-                                return None
+                                return hunting_data
                         else:
                             logger.info(self.log_message(
                                 f"Hunting: {pool_slug} | {status}",
@@ -1140,24 +1186,34 @@ class TonKombatBot(BaseBot):
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     if response.status == 400:
-                        error_data = await response.json()
-                        logger.warning(self.log_message(
-                            f"Error starting hunting: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
+                        response_json = await response.json()
+                        error_message = response_json.get('message', '')
+                        if 'user is hunting' in error_message:
+                            logger.debug(self.log_message(
+                                "User is already hunting",
+                                'hunt'
+                            ))
+                            return False
+                        else:
+                            logger.debug(self.log_message(
+                                f"Error starting hunting: {error_message}",
+                                'hunt'
+                            ))
+                            return False
                     elif response.status == 404:
                         logger.debug(self.log_message(
-                            "Hunting start endpoint unavailable"
+                            "Hunting start endpoint unavailable",
+                            'hunt'
                         ))
                         return False
-                        
+                    
                     response.raise_for_status()
                     result = await response.json()
                     
-                    if result and 'data' in result and result['data']:
-                        logger.success(self.log_message(
-                            f"Hunting in location {pool_slug} successfully started!"
+                    if result and 'data' in result:
+                        logger.info(self.log_message(
+                            f"Started hunting in {pool_slug}",
+                            'hunt'
                         ))
                         return True
                     return False
@@ -1221,14 +1277,19 @@ class TonKombatBot(BaseBot):
             return False
 
     async def check_and_start_hunting(self, query: str) -> None:
-        hunting_data = await self.hunting_status(query)
+        hunting_status = await self.hunting_status(query)
         
-        if hunting_data is None:
-            await self.hunting_start(query)
-            hunting_data = await self.hunting_status(query)
+        if hunting_status is None:
+            hunting_result = await self.hunting_start(query)
+            if not hunting_result:
+                logger.debug(self.log_message(
+                    "Failed to start hunting",
+                    'hunt'
+                ))
+            hunting_status = await self.hunting_status(query)
             
-        if hunting_data and 'time_left' in hunting_data:
-            sleep_time = (min(hunting_data['time_left'], 14400))+randint(0, 3600)
+        if hunting_status and 'time_left' in hunting_status:
+            sleep_time = (min(hunting_status['time_left'], 14400))+randint(0, 3600)
             logger.info(self.log_message(
                 f"Going to sleep for {int(sleep_time/3600)}h {int((sleep_time%3600)/60)}m",
                 'hunt'
@@ -1571,24 +1632,38 @@ class TonKombatBot(BaseBot):
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     if response.status == 400:
-                        error_data = await response.json()
-                        if error_data.get('message') == 'not enough tok balance':
+                        response_json = await response.json()
+                        error_message = response_json.get('message', '')
+                        if 'not enough tok' in error_message:
                             logger.debug(self.log_message(
-                                f"Not enough TOK to upgrade {upgrade_type}"
+                                f"Not enough TOK to upgrade {upgrade_type}",
+                                'upgrade'
                             ))
                             return False
-                        logger.warning(self.log_message(
-                            f"Error upgrading {upgrade_type}: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
-                        
+                        elif 'max level exceeded' in error_message:
+                            logger.debug(self.log_message(
+                                f"Maximum level reached for {upgrade_type}",
+                                'upgrade'
+                            ))
+                            return False
+                        else:
+                            logger.debug(self.log_message(
+                                f"Error upgrading {upgrade_type}: {error_message}",
+                                'upgrade'
+                            ))
+                            return False
+                    
                     response.raise_for_status()
                     result = await response.json()
                     
                     if result and 'data' in result:
-                        logger.success(self.log_message(
-                            f"Successfully upgraded {upgrade_type}"
+                        upgrade_data = result['data']
+                        level = upgrade_data.get('upgrade_level', 0)
+                        cost = float(upgrade_data.get('cost', 0) / 1000000000)
+                        
+                        logger.info(self.log_message(
+                            f"Upgraded {upgrade_type} to level {level} for {cost} TOK",
+                            'upgrade'
                         ))
                         return True
                     return False
@@ -1925,7 +2000,7 @@ class TonKombatBot(BaseBot):
                     result = await response.json()
                     
                     if result.get('data') is True:
-                        logger.success(self.log_message(
+                        logger.info(self.log_message(
                             f"Successfully claimed equipment: {equipment_id}",
                             'equipment'
                         ))
