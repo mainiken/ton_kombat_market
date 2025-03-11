@@ -34,6 +34,7 @@ PyQt5
 PyQt5-Qt5
 Pyrogram==2.0.106
 PySocks==1.7.1
+python-dateutil==2.9.0
 python-dotenv==1.0.1
 python-socks==2.5.1
 qrcode==8.0

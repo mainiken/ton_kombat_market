@@ -8,6 +8,7 @@ from better_proxy import Proxy
 from random import uniform, randint
 from time import time
 from datetime import datetime, timezone, timedelta
+from dateutil import parser
 import json
 import os
 
@@ -558,21 +559,8 @@ class TonKombatBot(BaseBot):
                         if 'next_refill' in energy_data:
                             try:
                                 next_refill_str = energy_data['next_refill']
-                                
-                                if next_refill_str.endswith('Z'):
-                                    next_refill_str = next_refill_str[:-1] + '+00:00'
-                                
-                                if '.' in next_refill_str:
-                                    main_part, remainder = next_refill_str.split('.')
-                                    if '+' in remainder:
-                                        micro, tz = remainder.split('+', 1)
-                                        next_refill_str = f"{main_part}.{micro[:6]}+{tz}"
-                                    else:
-                                        next_refill_str = f"{main_part}.{remainder[:6]}+00:00"
-                                elif '+' not in next_refill_str:
-                                    next_refill_str = f"{next_refill_str}+00:00"
-                                
-                                next_refill = datetime.fromisoformat(next_refill_str)
+                                next_refill = parser.parse(next_refill_str)
+                                next_refill = next_refill.replace(tzinfo=timezone.utc)
                                 
                                 if next_refill:
                                     now = datetime.now(timezone.utc)
@@ -591,7 +579,7 @@ class TonKombatBot(BaseBot):
                                             "Energy ready for refill",
                                             'energy'
                                         ))
-                            except (ValueError, TypeError) as e:
+                            except Exception as e:
                                 logger.error(self.log_message(
                                     f"Error parsing date: {e}",
                                     'error'
@@ -1121,30 +1109,10 @@ class TonKombatBot(BaseBot):
                         status = hunting_data.get('status', 'unknown')
                         
                         if 'end_time' in hunting_data:
-                            end_time_str = hunting_data['end_time']
-                            
                             try:
-                                if 'Z+' in end_time_str:
-                                    end_time_str = end_time_str.replace('Z+', '+')
-                                elif 'Z' in end_time_str:
-                                    end_time_str = end_time_str.replace('Z', '+00:00')
-                                
-                                if '.' in end_time_str:
-                                    parts = end_time_str.split('.')
-                                    main_part = parts[0]
-                                    
-                                    if '+' in parts[1]:
-                                        frac_parts = parts[1].split('+', 1)
-                                        micro = frac_parts[0][:6]
-                                        tz = frac_parts[1]
-                                        end_time_str = f"{main_part}.{micro}+{tz}"
-                                    else:
-                                        micro = parts[1][:6]
-                                        end_time_str = f"{main_part}.{micro}+00:00"
-                                elif '+' not in end_time_str:
-                                    end_time_str = f"{end_time_str}+00:00"
-                                
-                                end_time = datetime.fromisoformat(end_time_str)
+                                end_time_str = hunting_data['end_time']
+                                end_time = parser.parse(end_time_str)
+                                end_time = end_time.replace(tzinfo=timezone.utc)
                                 
                                 if end_time:
                                     now = datetime.now(timezone.utc)
@@ -1164,7 +1132,7 @@ class TonKombatBot(BaseBot):
                                         ))
                                         await self.hunting_claim(query, pool_slug)
                                         return None
-                            except ValueError as e:
+                            except Exception as e:
                                 logger.error(self.log_message(
                                     f"Error parsing date: {end_time_str} - {e}",
                                     'error'
