@@ -551,23 +551,18 @@ class TonKombatBot(BaseBot):
                             next_refill_str = energy_data['next_refill']
                             
                             try:
-                                if 'Z+' in next_refill_str:
-                                    next_refill_str = next_refill_str.replace('Z+', '+')
-                                elif 'Z' in next_refill_str:
-                                    next_refill_str = next_refill_str.replace('Z', '+00:00')
+                                # Нормализуем строку с датой
+                                if next_refill_str.endswith('Z'):
+                                    next_refill_str = next_refill_str[:-1] + '+00:00'
                                 
+                                # Обрезаем микросекунды до 6 знаков если они есть
                                 if '.' in next_refill_str:
-                                    parts = next_refill_str.split('.')
-                                    main_part = parts[0]
-                                    
-                                    if '+' in parts[1]:
-                                        frac_parts = parts[1].split('+', 1)
-                                        micro = frac_parts[0][:6]
-                                        tz = frac_parts[1]
-                                        next_refill_str = f"{main_part}.{micro}+{tz}"
+                                    main_part, fraction = next_refill_str.split('.')
+                                    if '+' in fraction:
+                                        micro, tz = fraction.split('+', 1)
+                                        next_refill_str = f"{main_part}.{micro[:6]}+{tz}"
                                     else:
-                                        micro = parts[1][:6]
-                                        next_refill_str = f"{main_part}.{micro}+00:00"
+                                        next_refill_str = f"{main_part}.{fraction[:6]}+00:00"
                                 elif '+' not in next_refill_str:
                                     next_refill_str = f"{next_refill_str}+00:00"
                                 
