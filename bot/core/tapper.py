@@ -207,6 +207,8 @@ class BaseBot:
         if energy_info:
             current_energy = energy_info['current_energy']
             max_energy = energy_info['max_energy']
+            next_refill = energy_info.get('next_refill')
+            
             logger.info(self.log_message(
                 f"{current_energy}/{max_energy}",
                 'energy'
@@ -214,14 +216,20 @@ class BaseBot:
             
             if current_energy > 0 and self.auto_fight:
                 await self.combats_me(self._init_data)
-            elif current_energy == 0:
-                next_refill = energy_info['next_refill']
-                time_to_next = (next_refill - datetime.now(timezone.utc)).total_seconds()
-                
-                logger.info(self.log_message(
-                    f"Next energy in: {int(time_to_next)}s",
-                    'energy'
-                ))
+            elif current_energy == 0 and next_refill:
+                try:
+                    now = datetime.now(timezone.utc)
+                    if isinstance(next_refill, datetime) and next_refill > now:
+                        time_to_next = int((next_refill - now).total_seconds())
+                        logger.info(self.log_message(
+                            f"Next energy in: {time_to_next}s",
+                            'energy'
+                        ))
+                except Exception as e:
+                    logger.error(self.log_message(
+                        f"Error calculating next refill time: {e}",
+                        'error'
+                    ))
                 
         if self.auto_hunting:
             await self.check_and_start_hunting(self._init_data)
@@ -548,21 +556,19 @@ class TonKombatBot(BaseBot):
                         next_refill = None
                         
                         if 'next_refill' in energy_data:
-                            next_refill_str = energy_data['next_refill']
-                            
                             try:
-                                # Нормализуем строку с датой
+                                next_refill_str = energy_data['next_refill']
+                                
                                 if next_refill_str.endswith('Z'):
                                     next_refill_str = next_refill_str[:-1] + '+00:00'
                                 
-                                # Обрезаем микросекунды до 6 знаков если они есть
                                 if '.' in next_refill_str:
-                                    main_part, fraction = next_refill_str.split('.')
-                                    if '+' in fraction:
-                                        micro, tz = fraction.split('+', 1)
+                                    main_part, remainder = next_refill_str.split('.')
+                                    if '+' in remainder:
+                                        micro, tz = remainder.split('+', 1)
                                         next_refill_str = f"{main_part}.{micro[:6]}+{tz}"
                                     else:
-                                        next_refill_str = f"{main_part}.{fraction[:6]}+00:00"
+                                        next_refill_str = f"{main_part}.{remainder[:6]}+00:00"
                                 elif '+' not in next_refill_str:
                                     next_refill_str = f"{next_refill_str}+00:00"
                                 
@@ -571,34 +577,31 @@ class TonKombatBot(BaseBot):
                                 if next_refill:
                                     now = datetime.now(timezone.utc)
                                     if next_refill > now:
-                                        time_left = next_refill - now
-                                        hours, remainder = divmod(time_left.seconds, 3600)
-                                        minutes, seconds = divmod(remainder, 60)
+                                        time_left = (next_refill - now).total_seconds()
+                                        hours = int(time_left // 3600)
+                                        minutes = int((time_left % 3600) // 60)
+                                        seconds = int(time_left % 60)
                                         
                                         logger.info(self.log_message(
-                                            f"Energy: {current_energy}/{max_energy} | Next refill: {hours}h {minutes}m {seconds}s",
+                                            f"Next energy refill in: {hours}h {minutes}m {seconds}s",
                                             'energy'
                                         ))
                                     else:
                                         logger.info(self.log_message(
-                                            f"Energy: {current_energy}/{max_energy} | Refill available",
+                                            "Energy ready for refill",
                                             'energy'
                                         ))
-                            except ValueError as e:
+                            except (ValueError, TypeError) as e:
                                 logger.error(self.log_message(
-                                    f"Error parsing date: {next_refill_str} - {e}",
+                                    f"Error parsing date: {e}",
                                     'error'
                                 ))
-                                logger.info(self.log_message(
-                                    f"Energy: {current_energy}/{max_energy}",
-                                    'energy'
-                                ))
-                                next_refill = datetime.now(timezone.utc) + timedelta(hours=1)
-                        else:
-                            logger.info(self.log_message(
-                                f"Energy: {current_energy}/{max_energy}",
-                                'energy'
-                            ))
+                                next_refill = datetime.now(timezone.utc) + timedelta(minutes=30)
+                        
+                        logger.info(self.log_message(
+                            f"Energy: {current_energy}/{max_energy}",
+                            'energy'
+                        ))
                         
                         return {
                             'current_energy': current_energy,
@@ -1297,8 +1300,7 @@ class TonKombatBot(BaseBot):
         hunting_status = await self.hunting_status(query)
         
         if hunting_status is None:
-            # Выбираем локацию на основе уровня
-            pool_slug = "cursed-fortress"  # Базовая локация
+            pool_slug = "cursed-fortress"
             if self.user_level >= 25:
                 pool_slug = "eternal-abyss-gate"
             elif self.user_level >= 15:
@@ -1307,7 +1309,7 @@ class TonKombatBot(BaseBot):
             hunting_result = await self.hunting_start(query, pool_slug)
             if not hunting_result:
                 logger.debug(self.log_message(
-                    "Не удалось начать охоту",
+                    "Failed to start hunting",
                     'hunt'
                 ))
             hunting_status = await self.hunting_status(query)
@@ -1315,7 +1317,7 @@ class TonKombatBot(BaseBot):
         if hunting_status and 'time_left' in hunting_status:
             sleep_time = (min(hunting_status['time_left'], 14400))+randint(0, 3600)
             logger.info(self.log_message(
-                f"Засыпаю на {int(sleep_time/3600)}ч {int((sleep_time%3600)/60)}м",
+                f"Sleeping for {int(sleep_time/3600)}h {int((sleep_time%3600)/60)}m",
                 'hunt'
             ))
             await asyncio.sleep(sleep_time)
