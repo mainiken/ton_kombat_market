@@ -81,7 +81,34 @@ class UpdateManager:
 
     async def check_for_updates(self) -> bool:
         try:
-            subprocess.run(["git", "fetch"], check=True, capture_output=True)
+            # Проверяем, что мы находимся в git репозитории
+            if not os.path.exists(".git"):
+                logger.error("❌ Не найден git репозиторий в текущей директории")
+                return False
+
+            # Проверяем конфигурацию git
+            try:
+                subprocess.run(
+                    ["git", "config", "--get", "remote.origin.url"],
+                    check=True,
+                    capture_output=True
+                )
+            except subprocess.CalledProcessError:
+                logger.error("❌ Не настроен remote origin в git конфигурации")
+                return False
+
+            # Выполняем fetch с подробным выводом ошибок
+            fetch_result = subprocess.run(
+                ["git", "fetch"],
+                capture_output=True,
+                text=True
+            )
+            
+            if fetch_result.returncode != 0:
+                logger.error(f"❌ Ошибка при выполнении git fetch: {fetch_result.stderr}")
+                return False
+
+            # Проверяем статус
             result = subprocess.run(
                 ["git", "status", "-uno"],
                 capture_output=True,
@@ -90,7 +117,12 @@ class UpdateManager:
             )
             return "Your branch is behind" in result.stdout
         except subprocess.CalledProcessError as e:
-            logger.error(f"Error checking updates: {e}")
+            logger.error(f"❌ Ошибка при проверке обновлений: {e}")
+            if e.stderr:
+                logger.error(f"Детали ошибки: {e.stderr.decode()}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка при проверке обновлений: {e}")
             return False
 
     def _pull_updates(self) -> bool:
