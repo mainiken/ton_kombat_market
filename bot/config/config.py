@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     DEVICE_PARAMS: bool = False
 
-    DEBUG_LOGGING: bool = True
+    DEBUG_LOGGING: bool = False
     LOG_LEVEL: str = "DEBUG"
     LOG_HTTP_REQUESTS: bool = False
 
