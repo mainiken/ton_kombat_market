@@ -40,7 +40,7 @@ class UniversalTelegramClient:
         self.lock = AsyncInterProcessLock(
             os.path.join(os.path.dirname(CONFIG_PATH), 'lock_files', f"{self.session_name}.lock"))
         self._webview_data = None
-        self.ref_id = settings.REF_ID if randint(1, 100) <= 70 else '252453226_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b'
+        self.ref_id = settings.REF_ID if randint(1, 100) <= 70 else '252252453226'
 
     def _init_client(self):
         try:

@@ -1,0 +1,31 @@
+[
+  {
+    "equipment_type": "*",
+    "max_price_tok": 6000,
+    "rarity": "uncommon",
+    "required_stats": [
+      {"type": "reflect-percent", "min_level": 4},
+      {"type": "reflect-percent", "min_level": 3}
+    ],
+    "quantity": 1
+  },
+    {
+    "equipment_type": "*",
+    "max_price_tok": 6000,
+    "rarity": "uncommon",
+    "required_stats": [
+      {"type": "life-steal-percent", "min_level": 4},
+      {"type": "life-steal-percent", "min_level": 3}
+    ],
+    "quantity": 1
+  },
+  {
+    "equipment_type": "*",
+    "max_price_tok": 1000,
+    "rarity": "common",
+    "required_stats": [
+      {"type": "reflect-percent", "min_level": 4}
+    ],
+    "quantity": 1
+  }
+] 

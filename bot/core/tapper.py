@@ -5,12 +5,41 @@ from urllib.parse import urlencode, unquote
 from aiocfscrape import CloudflareScraper
 from aiohttp_proxy import ProxyConnector
 from better_proxy import Proxy
-from random import uniform, randint
+from random import uniform, randint, random
 from time import time
 from datetime import datetime, timezone, timedelta
 from dateutil import parser
 import json
 import os
+import traceback
+import colorama
+from colorama import init, Fore, Style
+import sys
+from loguru import logger
+from bot.config import settings
+from datetime import date
+
+
+HTTP_TIMEOUT_SECONDS = 100
+RETRY_DELAY_SECONDS = 25
+PROXY_CHECK_SLEEP_MINUTES = 20
+ERROR_SLEEP_SECONDS = (180, 360)
+
+
+MAX_401_RETRIES = 3
+MARKET_PAGES_TO_MONITOR = 10
+
+
+LONG_SLEEP_MINUTES = (60, 120)
+
+
+TOKEN_LIVE_TIME_MIN = 3500
+TOKEN_LIVE_TIME_MAX = 3600
+
+
+BALANCE_CHECK_DELAY = (1, 30)
+
+init()
 
 from bot.utils.universal_telegram_client import UniversalTelegramClient
 from bot.utils.proxy_utils import check_proxy, get_working_proxy
@@ -21,283 +50,192 @@ from bot.exceptions import InvalidSession
 
 
 class BaseBot:
-    
+    EMOJI = {
+        'debug': '🔍',
+        'success': '✅',
+        'info': 'ℹ️',
+        'warning': '⚠️',
+        'error': '❌',
+        'balance': '💎',
+        'reward': '💰',
+        'equipment': '🗡️',
+        'proxy': '🌐',
+        'sleep': '😴',
+        'mission': '🎯',
+    }
+
     def __init__(self, tg_client: UniversalTelegramClient):
+        self.error_401_count = 0
         self.tg_client = tg_client
-        if hasattr(self.tg_client, 'client'):
+        if hasattr(self.tg_client, 'client') and self.tg_client.client is not None:
             self.tg_client.client.no_updates = True
-            
         self.session_name = tg_client.session_name
         self._http_client: Optional[CloudflareScraper] = None
         self._current_proxy: Optional[str] = None
         self._access_token: Optional[str] = None
         self._is_first_run: Optional[bool] = None
         self._init_data: Optional[str] = None
-        self._current_ref_id: Optional[str] = None
-        
         session_config = config_utils.get_session_config(self.session_name, CONFIG_PATH)
         if not all(key in session_config for key in ('api', 'user_agent')):
             logger.critical(f"CHECK accounts_config.json as it might be corrupted")
             exit(-1)
-            
         self.proxy = session_config.get('proxy')
         if self.proxy:
             proxy = Proxy.from_str(self.proxy)
             self.tg_client.set_proxy(proxy)
             self._current_proxy = self.proxy
 
-    def get_ref_id(self) -> str:
-        if self._current_ref_id is None:
-            random_number = randint(1, 100)
-            ref_id = settings.REF_ID if random_number <= 70 else '252453226_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b'
-            
-            if random_number <= 70 and '_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b' not in ref_id:
-                ref_id = f"{ref_id}_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b"
-                
-            self._current_ref_id = ref_id
-        return self._current_ref_id
+    def _log(self, level: str, message: str, emoji_key: Optional[str] = None) -> None:
+        if level == 'debug' and not settings.DEBUG_LOGGING:
+            return
+
+        emoji = self.EMOJI.get(emoji_key, self.EMOJI.get(level, ''))
+
+        full_message = f"{self.session_name} | {emoji} {message}" if emoji else f"{self.session_name} | {message}"
+
+        if hasattr(logger, level):
+            log_method = getattr(logger, level)
+            log_method(full_message)
+        else:
+            logger.info(full_message)
 
     async def get_tg_web_data(self, app_name: str = "Ton_kombat_bot", path: str = "app") -> str:
         try:
             webview_url = await self.tg_client.get_app_webview_url(
                 app_name,
                 path,
-                self.get_ref_id()
+                settings.REF_ID
             )
-            
             if not webview_url:
                 raise InvalidSession("Failed to get webview URL")
-                
             tg_web_data = unquote(
                 string=webview_url.split('tgWebAppData=')[1].split('&tgWebAppVersion')[0]
             )
-            
             self._init_data = tg_web_data
             return tg_web_data
-            
+        except aiohttp.ClientError as e:
+            self._log('error', f"Сетевая ошибка при получении TG Web Data: {str(e)}\n{traceback.format_exc()}", emoji_key='error')
+            raise InvalidSession("Ошибка сети при получении TG Web Data")
         except Exception as e:
-            logger.error(f"Error getting TG Web Data: {str(e)}")
-            raise InvalidSession("Failed to get TG Web Data")
+            self._log('error', f"Неизвестная ошибка при получении TG Web Data: {str(e)}\n{traceback.format_exc()}", emoji_key='error')
+            raise InvalidSession("Критическая ошибка при получении TG Web Data")
 
     async def check_and_update_proxy(self, accounts_config: dict) -> bool:
         if not settings.USE_PROXY:
             return True
-
         if not self._current_proxy or not await check_proxy(self._current_proxy):
             new_proxy = await get_working_proxy(accounts_config, self._current_proxy)
             if not new_proxy:
                 return False
-
             self._current_proxy = new_proxy
             if self._http_client and not self._http_client.closed:
                 await self._http_client.close()
-
             proxy_conn = {'connector': ProxyConnector.from_url(new_proxy)}
-            self._http_client = CloudflareScraper(timeout=aiohttp.ClientTimeout(60), **proxy_conn)
-            logger.info(f"Switched to new proxy: {new_proxy}")
-
+            self._http_client = CloudflareScraper(timeout=aiohttp.ClientTimeout(HTTP_TIMEOUT_SECONDS), **proxy_conn)
+            self._log('info', f"Switched to new proxy: {new_proxy}", emoji_key='info')
         return True
 
     async def initialize_session(self) -> bool:
         try:
             self._is_first_run = await check_is_first_run(self.session_name)
             if self._is_first_run:
-                logger.info(f"First run detected for session {self.session_name}")
+                self._log('info', f"First run detected for session {self.session_name}", emoji_key='info')
                 await append_recurring_session(self.session_name)
             return True
+        except aiohttp.ClientError as e:
+            self._log('error', f"Ошибка сети при инициализации сессии: {str(e)}\n{traceback.format_exc()}", emoji_key='error')
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+            return await self.initialize_session()
         except Exception as e:
-            logger.error(f"Session initialization error: {str(e)}")
+            self._log('error', f"Критическая ошибка при инициализации сессии: {str(e)}\n{traceback.format_exc()}", emoji_key='error')
             return False
+
+    async def handle_401_error(self, error_401_count: int) -> int:
+        if error_401_count >= MAX_401_RETRIES:
+            self._log('warning', "Ошибка 401 - Обновляем токен и уходим в длительный сон...")
+
+            await self.get_tg_web_data()
+
+            sleep_time = randint(*[x * 60 for x in LONG_SLEEP_MINUTES])
+            self._log('info', f"Сон на {sleep_time // 60} минут")
+            await asyncio.sleep(sleep_time)
+
+            return 0
+        return error_401_count
 
     async def make_request(self, method: str, url: str, **kwargs) -> Optional[Dict]:
         if not self._http_client:
             raise InvalidSession("HTTP client not initialized")
-
         try:
+            start_time = time()
+            self._log('debug', f"Making {method.upper()} request to {url}")
+
             async with getattr(self._http_client, method.lower())(url, **kwargs) as response:
-                if response.status == 200:
-                    return await response.json()
-                logger.error(f"Request failed with status {response.status}")
+                duration = time() - start_time
+                status = response.status
+
+                if status == 401:
+                    self.error_401_count += 1
+                    self.error_401_count = await self.handle_401_error(self.error_401_count)
+                    return await self.make_request(method, url, **kwargs)
+
+                if status == 200:
+                    json_resp = await response.json()
+                    self._log(
+                        'debug',
+                        message=f"Request {method.upper()} {url} | Status: {status} | Duration: {duration:.2f}s | Response: {str(json_resp)[:500]}..."
+                    )
+                    return json_resp
+
+                self._log('debug', f"Request {method.upper()} {url} failed with status {status} | Duration: {duration:.2f}s")
+                self._log('debug', f"Request {method.upper()} {url} | Status: {status} | Duration: {duration:.2f}s | Error: Request failed with status {status}")
                 return None
+
+        except aiohttp.ClientError as e:
+            error_msg = f"Сетевая ошибка при выполнении запроса: {str(e)}\n{traceback.format_exc()}"
+            self._log('error', error_msg)
+            self._log('debug', f"Request {method.upper()} {url} | Error: {str(e)}")
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+            return await self.make_request(method, url, **kwargs)
+
         except Exception as e:
-            logger.error(f"Request error: {str(e)}")
+            error_msg = f"Критическая ошибка при выполнении запроса: {str(e)}\n{traceback.format_exc()}"
+            self._log('error', error_msg)
+            self._log('debug', f"Request {method.upper()} {url} | Error: {str(e)}")
             return None
 
     async def run(self) -> None:
         if not await self.initialize_session():
             return
-
         random_delay = uniform(1, settings.SESSION_START_DELAY)
-        logger.info(f"Bot will start in {int(random_delay)}s")
+        self._log('info', f'Бот запустится через ⌚<g> {int(random_delay)}s </g>', emoji_key='sleep')
         await asyncio.sleep(random_delay)
-
         proxy_conn = {'connector': ProxyConnector.from_url(self._current_proxy)} if self._current_proxy else {}
-        async with CloudflareScraper(timeout=aiohttp.ClientTimeout(60), **proxy_conn) as http_client:
+        async with CloudflareScraper(timeout=aiohttp.ClientTimeout(HTTP_TIMEOUT_SECONDS), **proxy_conn) as http_client:
             self._http_client = http_client
-
             while True:
                 try:
                     session_config = config_utils.get_session_config(self.session_name, CONFIG_PATH)
                     if not await self.check_and_update_proxy(session_config):
-                        logger.warning('Failed to find working proxy. Sleep 5 minutes.')
-                        await asyncio.sleep(300)
+                        self._log('warning', 'Не удалось найти рабочий прокси. Сон 5 минут.', emoji_key='proxy')
+                        await asyncio.sleep(PROXY_CHECK_SLEEP_MINUTES * 60)
                         continue
-
                     await self.process_bot_logic()
-                    
                 except InvalidSession as e:
-                    raise
+                    self._log('debug', f"Завершение работы: {str(e)}")
+                    return
                 except Exception as error:
-                    sleep_duration = uniform(60, 120)
-                    logger.error(f"Unknown error: {error}. Sleeping for {int(sleep_duration)}")
+                    sleep_duration = uniform(*ERROR_SLEEP_SECONDS)
+                    self._log('debug', f"Unknown error: {error}. Sleeping for {int(sleep_duration)}")
+                    self._log('debug', traceback.format_exc())
                     await asyncio.sleep(sleep_duration)
 
-    async def process_bot_logic(self) -> None:
-        token_live_time = randint(3500, 3600)
-        
-        if time() - self.access_token_created_time >= token_live_time or not self._init_data:
-            self._init_data = await self.get_tg_web_data()
-            self.access_token_created_time = time()
-            
-        if not self.is_onboarded:
-            is_onboarded = await self.check_onboard_status(self._init_data)
-            if not is_onboarded:
-                onboarding_result = await self.perform_onboarding(self._init_data)
-                if not onboarding_result:
-                    await asyncio.sleep(30)
-                    return
-            else:
-                self.is_onboarded = True
-            
-        user_info = await self.get_user_info(self._init_data)
-        if not user_info:
-            await asyncio.sleep(30)
-            return
-            
-        await self.partners_claim_reward(self._init_data)
-            
-        daily_result = await self.daily(self._init_data)
-        if daily_result:
-            await self.users_claim(self._init_data)
-            await self.users_stars_spend(self._init_data)
-            
-        await self.season_reward_info(self._init_data)
-        await self.season_me(self._init_data)
-        await self.season_start(self._init_data)
-        
-        await self.check_and_do_upgrades(self._init_data)
-        
-        await self.check_and_join_guild(self._init_data)
-        
-        await self.check_and_claim_medals(self._init_data)
-        
-        await self.check_and_claim_equipment(self._init_data)
-        
-        await self.tasks_progresses(self._init_data)
-        
-        await self.check_and_join_tournament(self._init_data)
-            
-        balance = await self.users_balance(self._init_data)
-        if balance and 'data' in balance:
-            logger.info(self.log_message(
-                f"Balance: {float(balance['data'] / 1000000000):.2f} TOK",
-                'balance'
-            ))
-            
-        energy_info = await self.get_energy_info(self._init_data)
-        if energy_info:
-            current_energy = energy_info['current_energy']
-            max_energy = energy_info['max_energy']
-            next_refill = energy_info.get('next_refill')
-            
-            
-            if current_energy > 0 and self.auto_fight:
-                await self.combats_me(self._init_data)
-            elif current_energy == 0 and next_refill:
-                try:
-                    now = datetime.now(timezone.utc)
-                    if isinstance(next_refill, datetime) and next_refill > now:
-                        time_to_next = int((next_refill - now).total_seconds())
-                        logger.info(self.log_message(
-                            f"Next energy in: {time_to_next}s",
-                            'energy'
-                        ))
-                except Exception as e:
-                    logger.error(self.log_message(
-                        f"Error calculating next refill time: {e}",
-                        'error'
-                    ))
-                
-        if self.auto_hunting:
-            await self.check_and_start_hunting(self._init_data)
-            
-        await asyncio.sleep(uniform(2, 5))
 
-
-async def run_tapper(tg_client: UniversalTelegramClient):
-    bot = TonKombatBot(tg_client=tg_client)
-    try:
-        await bot.run()
-    except InvalidSession as e:
-        logger.error(bot.log_message(f"Invalid session: {e}", 'error'))
-        raise  
-
-class TonKombatBot(BaseBot):
-    EMOJI = {
-        'info': '🔵',
-        'success': '✅',
-        'warning': '⚠️',
-        'error': '❌',
-        'debug': '🔍',
-        'combat': '⚔️',
-        'win': '🏆',
-        'loss': '💀',
-        'reward': '💰',
-        'energy': '⚡',
-        'balance': '💎',
-        'stars': '⭐',
-        'hunt': '🏹',
-        'season': '🎯',
-        'tournament': '🎪',
-        'task': '📋',
-        'upgrade': '⬆️',
-        'pet': '🐾',
-        'onboard': '🎮',
-        'equipment': '🗡️'
-    }
-
-    BLACKLISTED_TASKS = {
-        'Join Crypto Garden',
-        'Join Our Community'
-    }
-    
-    EQUIPMENT_TO_CHECK = {
-        'sword-welcome',
-        'key-ss2-reward',
-        'wings-hamster',
-        'shield-queen-gift',
-        'halloween-happy-bird'
-    }
-    
-    MAX_UPGRADE_LEVELS = {
-        'pocket-size': 10,
-        'mining-tok': float('inf')
-    }
-
+class MarketMonitorBot(BaseBot):
     def __init__(self, tg_client: UniversalTelegramClient):
         super().__init__(tg_client)
-        session_config = config_utils.get_session_config(
-            self.session_name, 
-            CONFIG_PATH
-        )
-        
-        self.pet_active_skill = settings.PET_ACTIVE_SKILL
-        self.auto_fight = settings.AUTO_FIGHT
-        self.auto_hunting = True
-        self.user_level = 1
-        self.is_onboarded = False
-        self.claimed_equipment = set()
-        
+        session_config = config_utils.get_session_config(self.session_name, CONFIG_PATH)
+        self._token_live_time = randint(TOKEN_LIVE_TIME_MIN, TOKEN_LIVE_TIME_MAX)
         self.headers = {
             'Host': 'liyue.tonkombat.com',
             'Origin': 'https://staggering.tonkombat.com',
@@ -307,1691 +245,403 @@ class TonKombatBot(BaseBot):
             'Accept-Language': 'en-US,en;q=0.9',
             'Content-Type': 'application/json'
         }
-        
         self.access_token_created_time = 0
+        self._current_ref_id = None
 
-    def log_message(self, message: str, emoji_key: str = 'info') -> str:
-        emoji = self.EMOJI.get(emoji_key, '')
-        return f"{self.session_name} | {emoji} {message}"
-        
-    async def add_request_delay(self) -> None:
-        await asyncio.sleep(uniform(2, 4))
+    def get_ref_id(self) -> str:
+        if self._current_ref_id is None:
+            self._current_ref_id = settings.REF_ID
+        return self._current_ref_id
 
-    async def get_user_info(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/users/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
+    async def get_tg_web_data(self, app_name: str = "Ton_kombat_bot", path: str = "app") -> str:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if 'data' in result:
-                        user = result['data']
-                        upgrades = user.get('upgrades', [])
-                        self.user_level = len(upgrades) + 3
-                        
-                        balance = await self.users_balance(query)
-                        current_balance = (
-                            float(balance['data'] / 1000000000) 
-                            if balance and 'data' in balance 
-                            else 0
-                        )
-                        
-                        logger.info(self.log_message(
-                            f"Account: {user.get('username', 'Unknown')} | "
-                            f"LVL: {self.user_level} | "
-                            f"TOK: {current_balance:.2f} | "
-                            f"Stars: {float(user.get('stars', 0) / 1000000000):.2f}",
-                            'info'
-                        ))
-                    return result
-        except Exception as error:
-            logger.error(self.log_message(
-                f"Error getting user information: {error}",
-                'error'
-            ))
-            return None
+            webview_url = await self.tg_client.get_app_webview_url(
+                app_name,
+                path,
+                self.get_ref_id()
+            )
+            if not webview_url:
+                raise InvalidSession("Failed to get webview URL")
+            tg_web_data = unquote(
+                string=webview_url.split('tgWebAppData=')[1].split('&tgWebAppVersion')[0]
+            )
+            self._init_data = tg_web_data
+            self._log('debug', f'Получены TG Web Data для {app_name}: {tg_web_data}', emoji_key='info')
+            return tg_web_data
+        except aiohttp.ClientError as e:
+            self._log('error', f"Сетевая ошибка при получении TG Web Data: {str(e)}\n{traceback.format_exc()}", emoji_key='error')
+            raise InvalidSession("Ошибка сети при получении TG Web Data")
+        except Exception as e:
+            self._log('error', f"Неизвестная ошибка при получении TG Web Data: {str(e)}\n{traceback.format_exc()}", emoji_key='error')
+            raise InvalidSession("Критическая ошибка при получении TG Web Data")
 
-    async def users_balance(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
+    async def users_balance(self) -> Optional[float]:
+        await asyncio.sleep(uniform(*BALANCE_CHECK_DELAY))
         url = 'https://liyue.tonkombat.com/api/v1/users/balance'
         headers = {
             **self.headers,
-            'Authorization': f'tma {query}'
+            'Authorization': f'tma {self._init_data}'
         }
-        
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    url=url, 
-                    headers=headers, 
+                    url=url,
+                    headers=headers,
                     ssl=False,
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
-                    response.raise_for_status()
-                    return await response.json()
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting balance: {e}",
-                'error'
-            ))
-            return None
-
-    async def users_claim(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/users/claim'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        if error_data.get('message') == 'claim too early':
-                            logger.info(self.log_message(
-                                "Mining reward not available yet"
-                            ))
-                            return True
-                        logger.warning(self.log_message(
-                            f"Error claiming mining reward: "
-                            f"{error_data.get('message')}"
-                        ))
-                        return False
-                        
                     response.raise_for_status()
                     result = await response.json()
-                    
-                    if result and 'data' in result and 'amount' in result['data']:
-                        amount = float(result['data']['amount'] / 1000000000)
-                        logger.success(self.log_message(
-                            f"Received {amount} TOK for mining"
-                        ))
-                    return True
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming mining reward: {e}",
-                'error'
-            ))
-            return False
+                    balance_tok = float(result.get('data', 0)) / 1_000_000_000
+                    self._log('info', f"Баланс: {balance_tok:.2f} TOK", 'balance')
+                    return balance_tok
+        except Exception:
+            return None
 
-    async def users_stars_spend(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/users/stars/spend'
-        data = json.dumps({'type': 'upgrade-army-rank'})
+    async def get_purchase_history(self, page: int = 1, page_size: int = 50) -> Optional[List[dict]]:
+        await asyncio.sleep(uniform(*BALANCE_CHECK_DELAY))
+        url = f"https://liyue.tonkombat.com/api/v1/market-equipment-history/me?page={page}&page_size={page_size}"
         headers = {
             **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': str(len(data)),
-            'Content-Type': 'application/json'
+            'Authorization': f'tma {self._init_data}'
         }
-        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url=url,
+                    headers=headers,
+                    ssl=False,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    items = result.get('data', {}).get('items', [])
+                    for item in items:
+                        name = item.get('metadata', {}).get('equipment', {}).get('name', 'Unknown')
+                        price = float(item.get('price_gross', 0)) / 1_000_000_000
+                        self._log('info', f"Покупка: {name} за {price:.2f} TOK", 'equipment')
+                    return items
+        except Exception:
+            return None
+
+    async def buy_equipment(self, market_equipment_id: str, attempt: int = 1, max_attempts: int = 3) -> bool:
+        url = 'https://liyue.tonkombat.com/api/v1/market/equipment/buy'
+        headers = {
+            **self.headers,
+            'Authorization': f'tma {self._init_data}'
+        }
+        data = json.dumps({"market_equipment_id": market_equipment_id})
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url=url, 
-                    headers=headers, 
+                    url=url,
+                    headers=headers,
                     data=data,
                     ssl=False,
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        if error_data.get('message') == 'not enough stars to upgrade':
-                            logger.info(self.log_message(
-                                "Not enough stars to upgrade rank"
-                            ))
-                            return True
-                        logger.warning(self.log_message(
-                            f"Error spending stars: {error_data.get('message')}"
-                        ))
-                        return False
-                        
                     response.raise_for_status()
                     result = await response.json()
-                    
                     if result.get('data'):
-                        logger.success(self.log_message(
-                            "Army rank successfully upgraded"
-                        ))
-                    return True
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error spending stars: {e}",
-                'error'
-            ))
-            return False
-
-    async def daily(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/daily'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        if error_data.get('message') == 'already claimed for today':
-                            logger.info(self.log_message(
-                                "Daily bonus already claimed"
-                            ))
-                            return True
-                        logger.warning(self.log_message(
-                            f"Error claiming daily bonus: "
-                            f"{error_data.get('message')}"
-                        ))
-                        return False
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result and 'amount' in result['data']:
-                        amount = float(result['data']['amount'] / 1000000000)
-                        logger.success(self.log_message(
-                            f"Received {amount} TOK daily bonus"
-                        ))
-                    return True
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming daily bonus: {e}",
-                'error'
-            ))
-            return False
-
-    async def get_energy_info(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/combats/energy'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if 'data' in result:
-                        energy_data = result['data']
-                        current_energy = energy_data.get('current_energy', 0)
-                        max_energy = energy_data.get('max_energy', 20)
-                        next_refill = None
-                        
-                        if 'next_refill' in energy_data:
-                            try:
-                                next_refill_str = energy_data['next_refill']
-                                next_refill = parser.parse(next_refill_str)
-                                next_refill = next_refill.replace(tzinfo=timezone.utc)
-                                
-                                if next_refill:
-                                    now = datetime.now(timezone.utc)
-                                    if next_refill > now:
-                                        time_left = (next_refill - now).total_seconds()
-                                        hours = int(time_left // 3600)
-                                        minutes = int((time_left % 3600) // 60)
-                                        seconds = int(time_left % 60)
-                                        
-                                        logger.info(self.log_message(
-                                            f"Next energy refill in: {hours}h {minutes}m {seconds}s",
-                                            'energy'
-                                        ))
-                                    else:
-                                        logger.info(self.log_message(
-                                            "Energy ready for refill",
-                                            'energy'
-                                        ))
-                            except Exception as e:
-                                logger.error(self.log_message(
-                                    f"Error parsing date: {e}",
-                                    'error'
-                                ))
-                                next_refill = datetime.now(timezone.utc) + timedelta(minutes=30)
-                        
-                        logger.info(self.log_message(
-                            f"Energy: {current_energy}/{max_energy}",
-                            'energy'
-                        ))
-                        
-                        return {
-                            'current_energy': current_energy,
-                            'max_energy': max_energy,
-                            'next_refill': next_refill,
-                            **energy_data
-                        }
-                    return None
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting energy info: {e}",
-                'error'
-            ))
-            return None
-
-    async def get_equipments(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/equipments/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    return result.get('data', [])
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting equipments: {e}",
-                'error'
-            ))
-            return None
-
-    async def get_equipped_items(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/equipments/equipped'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    return result.get('data', [])
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting equipped items: {e}",
-                'error'
-            ))
-            return None
-
-    async def equip_item(self, query: str, item_id: str) -> bool:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/equipments/{item_id}/equip'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.patch(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    if result.get('data') is True:
-                        logger.success(self.log_message(
-                            f"Successfully equipped item {item_id}",
-                            'info'
-                        ))
+                        self._log('success', f'Покупка успешна: {market_equipment_id}')
                         return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error equipping item {item_id}: {e}",
-                'error'
-            ))
-            return False
-
-    async def check_and_equip_items(self, query: str) -> None:
-        equipped_items = await self.get_equipped_items(query)
-        if equipped_items is None:
-            return
-            
-        all_items = await self.get_equipments(query)
-        if all_items is None:
-            return
-            
-        best_items = {}
-        for item in all_items:
-            item_type = item['type']
-            item_quality = item.get('quality', 0)
-            
-            if (item_type not in best_items or 
-                item_quality > best_items[item_type]['quality']):
-                best_items[item_type] = {
-                    'id': item['id'],
-                    'quality': item_quality,
-                    'status': item['status']
-                }
-        
-        for item_type, best_item in best_items.items():
-            equipped_item = next(
-                (item for item in equipped_items if item['type'] == item_type), 
-                None
-            )
-            
-            if (equipped_item is None or 
-                best_item['quality'] > equipped_item.get('quality', 0)):
-                if best_item['status'] == 'inventory':
-                    await self.equip_item(query, best_item['id'])
-                    await asyncio.sleep(uniform(1, 2))
-
-    async def combats_me(self, query: str) -> None:
-        await self.add_request_delay()
-        
-        await self.check_and_equip_items(query)
-        
-        url = 'https://liyue.tonkombat.com/api/v1/combats/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if 'data' in result and 'pet' in result['data']:
-                        if result['data']['pet'].get('active_skill') != self.pet_active_skill:
-                            await self.combats_pets_skill(query)
-                    
-                    await self.combats_find(query)
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting combat information: {e}",
-                'error'
-            ))
-
-    async def combats_pets_skill(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/combats/pets/skill'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        return None
-                    elif response.status == 404:
-                        logger.warning(self.log_message("Pet not found"))
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    logger.success(self.log_message(
-                        "Pet skill successfully used"
-                    ))
-                    return result
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error using pet skill: {e}",
-                'error'
-            ))
-            return None
-
-    async def combats_find(self, query: str) -> None:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/combats/find'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Type': 'application/json'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error = await response.json()
-                        if error['message'] == 'out of energies':
-                            logger.warning(self.log_message("No energy for battle"))
-                            return
-                            
-                    response.raise_for_status()
-                    await asyncio.sleep(randint(3, 5))
-                    await self.combats_fight(query)
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error finding opponent: {e}",
-                'error'
-            ))
-
-    async def combats_fight(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/combats/fight'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error = await response.json()
-                        if error['message'] == 'match not found':
-                            logger.warning(self.log_message(
-                                "Opponent not found",
-                                'combat'
-                            ))
-                            return None
-                        elif error['message'] == 'out of energies':
-                            logger.warning(self.log_message(
-                                "No energy for battle",
-                                'energy'
-                            ))
-                            return None
-                            
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        fight_data = result['data']
-                        winner = fight_data.get('winner')
-                        enemy = fight_data.get('enemy', {})
-                        rank_gain = fight_data.get('rank_gain', 0)
-                        
-                        if winner == 'attacker':
-                            logger.success(self.log_message(
-                                f"Victory over {enemy.get('username', 'Unknown')} (+{rank_gain})",
-                                'win'
-                            ))
-                        else:
-                            logger.warning(self.log_message(
-                                f"Defeat by {enemy.get('username', 'Unknown')}",
-                                'loss'
-                            ))
-                            
-                        await asyncio.sleep(randint(2, 4))
-                        await self.combats_find(query)
-                    return result
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error conducting battle: {e}",
-                'error'
-            ))
-            return None
-
-    async def season_start(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/season/start'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        logger.warning(self.log_message(
-                            f"Error starting season: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
-                    elif response.status == 404:
-                        logger.debug(self.log_message(
-                            "Season start endpoint unavailable"
-                        ))
-                        return False
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        reward = result['data']
-                        logger.success(self.log_message(
-                            f"Season successfully started! Reward: {reward}"
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error starting new season: {e}",
-                'error'
-            ))
-            return False
-
-    async def season_me(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/season/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 404:
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        season_data = result['data']
-                        logger.info(self.log_message(
-                            f"Season {season_data.get('current_season', 'Unknown')} | "
-                            f"Rank {season_data.get('rank_latest', 0)} | "
-                            f"Reward {season_data.get('reward', 0)}",
-                            'season'
-                        ))
-                    return result
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting season information: {e}",
-                'error'
-            ))
-            return None
-
-    async def season_reward_info(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/season/reward'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 404:
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result and result['data']:
-                        reward_data = result['data']
-                        reward_tok = float(reward_data.get('reward_tok', 0)) / 1000000000
-                        reward_star = float(reward_data.get('reward_star', 0)) / 1000000000
-                        rank = reward_data.get('rank_latest', 0)
-                        
-                        logger.info(self.log_message(
-                            f"Available season reward: {reward_tok:.2f} TOK, "
-                            f"{reward_star:.2f} stars, rank: {rank}"
-                        ))
-                        
-                        await self.season_reward_claim(query)
-                    return result
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting season reward information: {e}",
-                'error'
-            ))
-            return None
-
-    async def season_reward_claim(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/season/reward'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        logger.warning(self.log_message(
-                            f"Error claiming season reward: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
-                    elif response.status == 404:
-                        logger.debug(self.log_message(
-                            "Season reward claiming endpoint unavailable"
-                        ))
-                        return False
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result and result['data']:
-                        reward = float(result['data'].get('reward', 0) / 1000000000)
-                        season = result['data'].get('current_season', 'Unknown')
-                        logger.success(self.log_message(
-                            f"Claimed season reward {season}: {reward:.2f} TOK"
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming season reward: {e}",
-                'error'
-            ))
-            return False
-
-    async def hunting_status(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/hunting/me/hunting'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 404:
-                        logger.debug(self.log_message(
-                            "Hunting status endpoint unavailable",
-                            'hunt'
-                        ))
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        hunting_data = result['data']
-                        if hunting_data is None:
-                            logger.info(self.log_message(
-                                "No active hunting",
-                                'hunt'
-                            ))
-                            return None
-                        
-                        pool_slug = hunting_data.get('pool_slug', 'unknown')
-                        status = hunting_data.get('status', 'unknown')
-                        
-                        if 'end_time' in hunting_data:
-                            try:
-                                end_time_str = hunting_data['end_time']
-                                end_time = parser.parse(end_time_str)
-                                end_time = end_time.replace(tzinfo=timezone.utc)
-                                
-                                if end_time:
-                                    now = datetime.now(timezone.utc)
-                                    if end_time > now:
-                                        time_left = end_time - now
-                                        hours, remainder = divmod(time_left.seconds, 3600)
-                                        minutes, seconds = divmod(remainder, 60)
-                                        logger.info(self.log_message(
-                                            f"Hunting: {pool_slug} | {hours}h {minutes}m {seconds}s",
-                                            'hunt'
-                                        ))
-                                        return {**hunting_data, 'time_left': time_left.total_seconds()}
-                                    else:
-                                        logger.info(self.log_message(
-                                            f"Hunting finished: {pool_slug}",
-                                            'hunt'
-                                        ))
-                                        await self.hunting_claim(query, pool_slug)
-                                        return None
-                            except Exception as e:
-                                logger.error(self.log_message(
-                                    f"Error parsing date: {end_time_str} - {e}",
-                                    'error'
-                                ))
-                                logger.info(self.log_message(
-                                    f"Hunting: {pool_slug} | {status}",
-                                    'hunt'
-                                ))
-                                return hunting_data
-                        else:
-                            logger.info(self.log_message(
-                                f"Hunting: {pool_slug} | {status}",
-                                'hunt'
-                            ))
-                            return hunting_data
-                    return None
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting hunting status: {e}",
-                'error'
-            ))
-            return None
-
-    async def hunting_start(self, query: str, pool_slug: str = "cursed-fortress") -> bool:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/hunting/start/{pool_slug}'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        response_json = await response.json()
-                        error_message = response_json.get('message', '')
-                        if 'user is hunting' in error_message:
-                            return False
-                        else:
-                            return False
-                    elif response.status == 404:
-                        return False
-                    
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        logger.info(self.log_message(
-                            f"Started hunting in {pool_slug}",
-                            'hunt'
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error starting hunting: {e}",
-                'error'
-            ))
-            return False
-
-    async def hunting_claim(self, query: str, pool_slug: str = "cursed-fortress") -> bool:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/hunting/claim/{pool_slug}'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        logger.warning(self.log_message(
-                            f"Error claiming hunting reward: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
-                    elif response.status == 404:
-                        return False
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        reward_data = result['data']
-                        stars = float(reward_data.get('stars', 0)) / 1000000000
-                        tok = float(reward_data.get('reward_tok', 0)) / 1000000000
-                        demons_killed = reward_data.get('total_demon_killed', 0)
-                        
-                        logger.success(self.log_message(
-                            f"Claimed hunting reward: {tok:.2f} TOK, "
-                            f"{stars:.2f} stars, demons killed: {demons_killed}"
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming hunting reward: {e}",
-                'error'
-            ))
-            return False
-
-    async def refresh_authorization(self) -> bool:
-        try:
-            self._init_data = await self.get_tg_web_data()
-            self.access_token_created_time = time()
-            
-            if not await self.check_onboard_status(self._init_data):
-                if not await self.perform_onboarding(self._init_data):
-                    return False
-                    
-            user_info = await self.get_user_info(self._init_data)
-            if not user_info:
+        except aiohttp.ClientError as e:
+            if attempt < max_attempts:
+                self._log('warning', f"Не удалось купить (попытка {attempt}/{max_attempts}): {market_equipment_id}. Повтор...")
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                return await self.buy_equipment(market_equipment_id, attempt=attempt+1, max_attempts=max_attempts)
+            else:
+                self._log('error', f"Не удалось купить после {max_attempts} попыток: {market_equipment_id}. Ошибка: {str(e)}")
                 return False
-                
-            return True
         except Exception as e:
-            logger.error(self.log_message(
-                f"Error refreshing authorization: {e}",
-                'error'
-            ))
+            self._log('error', f"Критическая ошибка при покупке: {str(e)}")
+            self._log('error', f'Ошибка при покупке: {e}')
             return False
 
-    async def check_and_start_hunting(self, query: str) -> None:
-        hunting_status = await self.hunting_status(query)
-        
-        if hunting_status is None:
-            pool_slug = "cursed-fortress"
-            if self.user_level >= 25:
-                pool_slug = "eternal-abyss-gate"
-            elif self.user_level >= 15:
-                pool_slug = "demonbane-keep"
-                
-            hunting_result = await self.hunting_start(query, pool_slug)
-            if not hunting_result:
+    async def debug_monitor_market(self, page_size: int = 20):
+        REQUEST_LIMIT = 25
+        TIME_WINDOW = 60
+        request_times = []
+        base_delay = 2.0
+        max_delay = 10.0
+        backoff_factor = 1.5
+        current_delay = base_delay
+        try:
+            with open('.buy', 'r', encoding='utf-8') as f:
+                filters = json.load(f)
+        except Exception as e:
+            self._log('error', f"Ошибка чтения .buy: {e}")
+            return
+
+        for f in filters:
+            if 'quantity' not in f:
+                f['quantity'] = 1
+            f['bought'] = 0
+
+        bought_ids = set()
+        current_page = 1
+        direction = 1
+        last_filter_index = 0
+        consecutive_empty = 0
+        error_400_count = 0
+        token_refreshed = False
+        sleep_done = False
+
+        next_direction_change_time = time() + uniform(60, 1200)
+        requests_in_current_direction = 0
+        max_requests_in_random_direction = 0
+
+        self._log('debug', f"Старт мониторинга рынка. Фильтры: {filters}")
+        while True:
+            f = filters[last_filter_index]
+            self._log('debug', f"Текущий фильтр: {f}")
+            if f['bought'] >= f['quantity']:
+                last_filter_index = (last_filter_index + 1) % len(filters)
+                continue
+            self._log('debug', f"Переход к фильтру: {f}, страница: {current_page}, направление: {direction}")
+
+            if random() < 0.2:
+                last_filter_index = (last_filter_index + 1) % len(filters)
+                current_page = 1
+                direction = 1
+                next_direction_change_time = time() + uniform(60, 1200)
+                requests_in_current_direction = 0
+                max_requests_in_random_direction = 0
+                await asyncio.sleep(uniform(2, 4))
+                continue
+
+            params = {
+                'page': current_page,
+            }
+
+            if 'equipment_type' in f and f['equipment_type'] != '*':
+                params['market_type'] = f['equipment_type']
+            if 'rarity' in f:
+                params['rarity'] = f['rarity']
+
+            has_statistic = 'required_stats' in f and f['required_stats']
+            if has_statistic:
+                params['statistic'] = f['required_stats'][0]['type']
+
+            params['sort_by_price'] = 'asc'
+
+            if has_statistic:
+                params['sort_by_statistic'] = 'desc'
+
+            self._log('debug', f"Параметры запроса: {params}")
+
+            url = f"https://liyue.tonkombat.com/api/v1/market/equipment?{urlencode(params)}"
+            headers = {
+                **self.headers,
+                'Authorization': f'tma {self._init_data}'
+            }
+
+            try:
+                now = time()
+                request_times = [t for t in request_times if now - t < TIME_WINDOW]
+
+                if len(request_times) >= REQUEST_LIMIT:
+                    sleep_time = TIME_WINDOW - (now - request_times[0]) + 0.5
+                    await asyncio.sleep(sleep_time)
+                    current_delay = min(current_delay * backoff_factor, max_delay)
+                    continue
+
+                if len(request_times) < REQUEST_LIMIT * 0.8:
+                    current_delay = max(base_delay, current_delay / backoff_factor)
+
+                actual_delay = current_delay * uniform(0.8, 1.2)
+                await asyncio.sleep(actual_delay)
+
+                request_times.append(time())
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url=url,
+                        headers=headers,
+                        ssl=False,
+                        timeout=aiohttp.ClientTimeout(total=20)
+                    ) as response:
+                        self._log('debug', f"GET {url} | status: {response.status}")
+                        if response.status == 401:
+                            self._log('error', f"Ошибка при получении рынка: {response.status}, message='{response.reason}', url={response.url}")
+                            raise InvalidSession(f"Получена ошибка 401 для сессии {self.session_name}. Требуется переавторизация.")
+
+                        error_400_count = 0
+                        response.raise_for_status()
+                        result = await response.json()
+                        items = result.get('data', {}).get('items', [])
+                        self._log('debug', f"Найдено предметов: {len(items)} на странице {current_page}")
+                        total_pages = (result.get('data', {}).get('total', 0) + page_size - 1) // page_size
+
+                        if not items:
+                            self._log('debug', f"Пустая страница {current_page}")
+                            consecutive_empty += 1
+                            if consecutive_empty >= 3:
+                                direction = -direction
+                                consecutive_empty = 0
+                                self._log('debug', f"Обнаружены 3 пустые страницы. Меняю направление на {direction}")
+                                requests_in_current_direction = 0
+                        else:
+                            self._log('debug', f"Передаю {len(items)} предметов в _analyze_items")
+                            consecutive_empty = 0
+                            await self._analyze_items(items, f, current_page, bought_ids)
+
+                        now = time()
+                        if now >= next_direction_change_time and direction == 1:
+                            direction = -1
+                            self._log('debug', "Настало время сменить направление на обратное для имитации человека.")
+                            max_requests_in_random_direction = randint(1, 3)
+                            requests_in_current_direction = 0
+                            next_direction_change_time = now + uniform(60, 1200)
+
+                        if direction == -1 and requests_in_current_direction >= max_requests_in_random_direction:
+                            direction = 1
+                            self._log('debug', "Достигнут лимит случайных запросов назад. Возвращаюсь к основному направлению.")
+                            requests_in_current_direction = 0
+
+                        requests_in_current_direction += 1
+
+                        if direction == 1 and current_page >= MARKET_PAGES_TO_MONITOR:
+                            self._log('info', f"Достигнут лимит страниц {MARKET_PAGES_TO_MONITOR} при движении вперед. Начинаю с первой страницы.")
+                            current_page = 1
+                            next_direction_change_time = time() + uniform(60, 1200)
+                            requests_in_current_direction = 0
+                            max_requests_in_random_direction = 0
+                            await asyncio.sleep(uniform(2, 4))
+                        elif direction == -1 and current_page <= 1:
+                             self._log('info', f"Достигнута первая страница при движении назад. Меняю направление на вперед.")
+                             direction = 1
+                             current_page = 1
+                             next_direction_change_time = time() + uniform(60, 1200)
+                             requests_in_current_direction = 0
+                             max_requests_in_random_direction = 0
+                             await asyncio.sleep(uniform(2, 4))
+
+                        current_page += direction
+                        if current_page < 1:
+                            current_page = 1
+                            direction = 1
+                            self._log('debug', "Номер страницы стал меньше 1. Сброс на 1 и изменение направления на вперед.")
+                            next_direction_change_time = time() + uniform(60, 1200)
+                            requests_in_current_direction = 0
+                            max_requests_in_random_direction = 0
+                            await asyncio.sleep(uniform(2, 4))
+
+                        delay_time = uniform(*settings.MARKET_MONITOR_DELAY_SECONDS)
+                        self._log('debug', f"Задержка перед следующим запросом к рынку: {delay_time:.2f} с", emoji_key='sleep')
+                        await asyncio.sleep(delay_time)
+
+            except Exception as e:
+                self._log('error', f"Ошибка при получении рынка: {e}")
+                self._log('debug', traceback.format_exc())
+                await asyncio.sleep(uniform(5, 10))
+                continue
+
+            if all(f['bought'] >= f['quantity'] for f in filters):
+                self._log('success', 'Все задачи выполнены, мониторинг завершён.')
                 return
-            hunting_status = await self.hunting_status(query)
-                
-        if hunting_status and 'time_left' in hunting_status:
-            sleep_time = (min(hunting_status['time_left'], 14400))+randint(0, 3600)
-            logger.info(self.log_message(
-                f"Sleeping for {int(sleep_time/3600)}h {int((sleep_time%3600)/60)}m",
-                'hunt'
-            ))
-            await asyncio.sleep(sleep_time)
-            
-            if not await self.refresh_authorization():
-                logger.error(self.log_message(
-                    "Failed to refresh authorization after sleep",
-                    'error'
-                ))
-                return
-                
-            await self.hunting_status(query)
-                
+
+    async def _analyze_items(self, items, filter_obj, page, bought_ids):
+        def stat_color(level):
+            if level >= 5:
+                return '🟣'
+            elif level == 4:
+                return '🔵'
+            elif level == 3:
+                return '🟢'
+            elif level == 2:
+                return '🟡'
+            elif level == 1:
+                return '🟠'
+            else:
+                return '⚪'
+
+        self._log('debug', f"Анализ предметов на странице {page}, фильтр: {filter_obj}")
+        for item in items:
+            item_name = item.get('metadata', {}).get('equipment', {}).get('name', '???')
+            stats = item.get('metadata', {}).get('equipment', {}).get('equipment_stats', [])
+            self._log('debug', f"Проверяю предмет: {item_name}, статы: {stats}")
+            stats = [stat for stat in stats if not stat.get('primary', False)]
+            user_equipment_id = item.get('user_equipment_id')
+            market_equipment_id = item.get('id')
+
+            type_ok = filter_obj.get('equipment_type', '*') == '*' or item.get('equipment_type') == filter_obj.get('equipment_type')
+            if not type_ok:
+                self._log('debug', f"Пропуск по типу: {item.get('equipment_type')} != {filter_obj.get('equipment_type')}")
+                continue
+
+            price_tok = float(item.get('price_gross', 0)) / 1_000_000_000
+            max_price = filter_obj.get('max_price_tok', 1e12)
+            price_ok = price_tok <= max_price
+            if not price_ok:
+                self._log('debug', f"Пропуск по цене: {price_tok} > {max_price}")
+                continue
+
+            used_stats = set()
+            matched_stats = []
+            all_match = True
+            for stat_filter in filter_obj['required_stats']:
+                found = False
+                for idx, stat in enumerate(stats):
+                    if idx in used_stats:
+                        continue
+                    if stat.get('type') == stat_filter['type']:
+                        stat_level = int(stat.get('level', 0))
+                        min_level = int(stat_filter.get('min_level', 0))
+                        if stat_level >= min_level:
+                            matched_stats.append((stat_filter, stat, True))
+                            used_stats.add(idx)
+                            found = True
+                            break
+                if not found:
+                    all_match = False
+                    self._log('debug', f"Не найден required_stat: {stat_filter} в {item_name}")
+                    break
+            if not all_match or len(used_stats) != len(filter_obj['required_stats']):
+                self._log('debug', f"Пропуск предмета {item_name} — не все required_stat найдены")
+                continue
+
+            status = 'success'
+            formatted_stats = []
+            for stat_filter, stat, is_ok in matched_stats:
+                stat_name = stat_filter['type'].replace('-', ' ').capitalize()
+                min_level = stat_filter.get('min_level', 0)
+                stat_level = stat.get('level')
+                stat_value = stat.get('value')
+                color = stat_color(stat_level)
+                if 'percent' in stat_filter['type']:
+                    value_str = f"+{stat_value}%"
+                else:
+                    value_str = f"+{stat_value}"
+                formatted_stats.append(f"{color} {stat_name} {value_str}")
+            stats_str = ', '.join(formatted_stats)
+            price_info = "✅ цена"
+            message = f"{item_name} [{user_equipment_id}|{market_equipment_id}] ({stats_str}) | {price_info} {price_tok:.1f} TOK"
+            self._log('info', message, status)
+            if market_equipment_id and market_equipment_id not in bought_ids:
+                self._log('debug', f"Пробую купить: {market_equipment_id}")
+                ok = await self.buy_equipment(market_equipment_id)
+                if ok:
+                    filter_obj['bought'] += 1
+                    bought_ids.add(market_equipment_id)
+                    self._log('debug', f"Покупка успешна: {market_equipment_id}")
+                    if filter_obj['bought'] >= filter_obj['quantity']:
+                        self._log('success', 'Все задачи выполнены, мониторинг завершён.')
+                        raise InvalidSession('Все задачи выполнены')
+                else:
+                    self._log('error', f"Покупка не удалась: {market_equipment_id}")
+        return False
+
+    async def process_bot_logic(self) -> None:
+        if not hasattr(self, 'access_token_created_time'):
+            self.access_token_created_time = 0
+        if time() - self.access_token_created_time >= self._token_live_time or not getattr(self, '_init_data', None):
+            await self.get_tg_web_data()
+            self.access_token_created_time = time()
+        await self.users_balance()
+        await self.debug_monitor_market()
         await asyncio.sleep(uniform(2, 5))
 
-    async def tasks_progresses(self, query: str) -> None:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/tasks/progresses'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    tasks = await response.json()
-                    
-                    for task in tasks.get('data', []):
-                        if task['name'] in self.BLACKLISTED_TASKS:
-                            continue
-                            
-                        if (task['task_user'] is None or 
-                            (task['task_user'].get('reward_amount', 0) == 0 and 
-                             task['task_user'].get('repeats', 0) == 0)):
-                            
-                            await self.tasks_execute(query, task['id'], task['name'])
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting task progresses: {e}",
-                'error'
-            ))
 
-    async def tasks_execute(self, query: str, task_id: str, task_name: str) -> bool:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/tasks/{task_id}'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    logger.success(self.log_message(
-                        f"Completed: {task_name}",
-                        'task'
-                    ))
-                    return True
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error executing task {task_name}: {e}",
-                'error'
-            ))
-            return False
-
-    async def tournament_daily_status(self, query: str) -> Optional[str]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/tournament/daily/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 404:
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        status = result['data'].get('status', 'unknown')
-                        logger.info(self.log_message(
-                            f"Tournament status: {status}"
-                        ))
-                        return status
-                    return None
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting tournament status: {e}",
-                'error'
-            ))
-            return None
-
-    async def tournament_register(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/tournament/register'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        logger.warning(self.log_message(
-                            f"Error registering for tournament: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
-                    elif response.status == 404:
-                        return False
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        logger.success(self.log_message(
-                            "Successfully registered for tournament!"
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error registering for tournament: {e}",
-                'error'
-            ))
-            return False
-
-    async def tournament_reward(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/tournament/reward'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 404:
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        reward_data = result['data']
-                        status = reward_data.get('status', 'unknown')
-                        
-                        if status != 'non-claimable':
-                            top = reward_data.get('top', -1)
-                            toks = float(
-                                reward_data.get('toks', 0) / 1000000000
-                            ) if reward_data.get('toks') else 0
-                            stars = float(
-                                reward_data.get('stars', 0) / 1000000000
-                            ) if reward_data.get('stars') else 0
-                            
-                            if toks > 0 or stars > 0:
-                                logger.info(self.log_message(
-                                    f"Available tournament reward: {toks:.2f} TOK, "
-                                    f"{stars:.2f} stars"
-                                ))
-                                if top > 0:
-                                    logger.info(self.log_message(
-                                        f"Tournament rank: {top}"
-                                    ))
-                        
-                        return reward_data
-                    return None
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting tournament reward: {e}",
-                'error'
-            ))
-            return None
-
-    async def check_and_join_tournament(self, query: str) -> None:
-        status = await self.tournament_daily_status(query)
-        
-        if status == "unregistered":
-            logger.info(self.log_message(
-                "Registering for tournament..."
-            ))
-            registration_result = await self.tournament_register(query)
-            
-            if registration_result:
-                status = await self.tournament_daily_status(query)
-                logger.success(self.log_message(
-                    "Successfully registered for tournament!"
-                ))
-        
-        elif status == "qualified":
-            logger.info(self.log_message(
-                "You are qualified to claim tournament reward!"
-            ))
-            await self.tournament_reward(query)
-
-    async def partners_balance(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/partners/balance'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 404:
-                        logger.debug(self.log_message(
-                            "Partners reward balance endpoint unavailable"
-                        ))
-                        return None
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        balance_data = result['data']
-                        return balance_data
-                    return None
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting partners reward balance: {e}",
-                'error'
-            ))
-            return None
-
-    async def partners_claim_reward(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/partners/claim-reward'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        error_data = await response.json()
-                        if error_data.get('message') == 'user already claimed':
-                            return False
-                        logger.warning(self.log_message(
-                            f"Error claiming partners reward: "
-                            f"{error_data.get('message', 'Unknown error')}"
-                        ))
-                        return False
-                    elif response.status == 404:
-                        logger.debug(self.log_message(
-                            "Partners reward claiming endpoint unavailable"
-                        ))
-                        return False
-                        
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and result.get('data') is True:
-                        balance_data = await self.partners_balance(query)
-                        reward_amount = float(
-                            balance_data.get('reward_tok', 0) / 1000000000
-                        )
-                        logger.success(self.log_message(
-                            f"Claimed partners reward: {reward_amount:.2f} TOK"
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming partners reward: {e}",
-                'error'
-            ))
-            return False
-
-    async def upgrades(self, query: str, upgrade_type: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/upgrades'
-        data = json.dumps({'type': upgrade_type})
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': str(len(data)),
-            'Content-Type': 'application/json'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    data=data,
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 400:
-                        response_json = await response.json()
-                        error_message = response_json.get('message', '')
-                        if 'not enough tok' in error_message:
-                            return False
-                        elif 'max level exceeded' in error_message:
-                            return False
-                        else:
-                            return False
-                    
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        upgrade_data = result['data']
-                        level = upgrade_data.get('upgrade_level', 0)
-                        cost = float(upgrade_data.get('cost', 0) / 1000000000)
-                        
-                        logger.info(self.log_message(
-                            f"Upgraded {upgrade_type} to level {level} for {cost} TOK",
-                            'upgrade'
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error upgrading {upgrade_type}: {e}",
-                'error'
-            ))
-            return False
-
-    async def check_and_do_upgrades(self, query: str) -> None:
-        await self.add_request_delay()
-        upgrade_types = ['mining-tok', 'pocket-size']
-        
-        balance = await self.users_balance(query)
-        if not balance or 'data' not in balance:
-            return
-            
-        current_balance = float(balance['data'] / 1000000000)
-        if current_balance <= 1:
-            return
-            
-        user_info = await self.get_user_info(query)
-        if not user_info or 'data' not in user_info:
-            return
-            
-        for upgrade_type in upgrade_types:
-            max_level = self.MAX_UPGRADE_LEVELS.get(upgrade_type, float('inf'))
-            current_level = user_info['data'].get(f'{upgrade_type}_level', 0)
-            
-            if current_level >= max_level:
-                continue
-                
-            max_attempts = randint(1, 3)
-            
-            for _ in range(max_attempts):
-                balance = await self.users_balance(query)
-                if not balance or 'data' not in balance:
-                    break
-                    
-                current_balance = float(balance['data'] / 1000000000)
-                if current_balance <= 1:
-                    break
-                    
-                upgrade_result = await self.upgrades(query, upgrade_type)
-                
-                if not upgrade_result:
-                    break
-                    
-                await asyncio.sleep(uniform(1, 3))
-
-    async def check_onboard_status(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/users/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    return response.status == 200
-        except Exception:
-            return False
-
-    async def perform_onboarding(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/users/onboard'
-        data = json.dumps({'house_id': 0})
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': str(len(data)),
-            'Content-Type': 'application/json'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    data=data,
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        if result and 'data' in result:
-                            logger.success(self.log_message(
-                                "Account successfully registered",
-                                'onboard'
-                            ))
-                            self.is_onboarded = True
-                            return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error during registration: {e}",
-                'error'
-            ))
-            return False
-
-    async def check_and_join_guild(self, query: str) -> None:
-        await self.add_request_delay()
-        guild_info = await self.guild_me(query)
-        
-        if guild_info is None:
-            logger.info(self.log_message(
-                "Joining MAINE GUILD...",
-                'info'
-            ))
-            await self.guild_join(query)
-            guild_info = await self.guild_me(query)
-        elif guild_info.get('id') != '9cbd0abe-0540-4f94-98f5-5c4a7fc1283b':
-            logger.info(self.log_message(
-                "Leaving current guild...",
-                'info'
-            ))
-            await self.guild_quit(query)
-            await self.guild_join(query)
-            guild_info = await self.guild_me(query)
-            
-        if guild_info and guild_info.get('id') == '9cbd0abe-0540-4f94-98f5-5c4a7fc1283b':
-            logger.success(self.log_message(
-                f"In MAINE GUILD | Rank: {guild_info.get('rank', 0)} | "
-                f"Points: {guild_info.get('point', 0)}",
-                'info'
-            ))
-
-    async def guild_me(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/guild/me'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    return result.get('data')
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting guild information: {e}",
-                'error'
-            ))
-            return None
-
-    async def guild_join(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/guild/join'
-        data = json.dumps({
-            "guild_id": "9cbd0abe-0540-4f94-98f5-5c4a7fc1283b",
-            "ref_id": "228618799"
-        })
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': str(len(data)),
-            'Content-Type': 'application/json'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    data=data,
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    return True
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error joining guild: {e}",
-                'error'
-            ))
-            return False
-
-    async def guild_quit(self, query: str) -> bool:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/guild/quit'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    return True
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error quitting guild: {e}",
-                'error'
-            ))
-            return False
-
-    async def get_medals(self, query: str) -> Optional[Dict]:
-        await self.add_request_delay()
-        url = 'https://liyue.tonkombat.com/api/v1/medals'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    return result.get('data')
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error getting medal list: {e}",
-                'error'
-            ))
-            return None
-
-    async def claim_medal(self, query: str, medal_type: str) -> bool:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/medals/{medal_type}'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result and 'data' in result:
-                        logger.success(self.log_message(
-                            f"Successfully claimed medal: {medal_type}",
-                            'reward'
-                        ))
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming medal {medal_type}: {e}",
-                'error'
-            ))
-            return False
-
-    async def check_and_claim_medals(self, query: str) -> None:
-        medals = await self.get_medals(query)
-        if not medals:
-            return
-            
-        for medal in medals:
-            if medal['status'] == 'claimable':
-                await self.claim_medal(query, medal['type'])
-                await asyncio.sleep(uniform(1, 2))
-
-    async def check_equipment_status(self, query: str, equipment_id: str) -> Optional[str]:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/equipments/{equipment_id}/status'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    return result.get('data')
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error checking equipment status for {equipment_id}: {e}",
-                'error'
-            ))
-            return None
-
-    async def claim_equipment(self, query: str, equipment_id: str) -> bool:
-        await self.add_request_delay()
-        url = f'https://liyue.tonkombat.com/api/v1/equipments/{equipment_id}/claim'
-        headers = {
-            **self.headers,
-            'Authorization': f'tma {query}',
-            'Content-Length': '0'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url=url, 
-                    headers=headers, 
-                    ssl=False,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-                    
-                    if result.get('data') is True:
-                        logger.info(self.log_message(
-                            f"Successfully claimed equipment: {equipment_id}",
-                            'equipment'
-                        ))
-                        self.claimed_equipment.add(equipment_id)
-                        return True
-                    return False
-        except Exception as e:
-            logger.error(self.log_message(
-                f"Error claiming equipment {equipment_id}: {e}",
-                'error'
-            ))
-            return False
-
-    async def check_and_claim_equipment(self, query: str) -> None:
-        equipment_to_check = self.EQUIPMENT_TO_CHECK - self.claimed_equipment
-        
-        for equipment_id in equipment_to_check:
-            status = await self.check_equipment_status(query, equipment_id)
-            if status == 'claimable':
-                await self.claim_equipment(query, equipment_id)
-                await asyncio.sleep(uniform(1, 2))
+async def run_tapper(tg_client: UniversalTelegramClient):
+    bot = MarketMonitorBot(tg_client=tg_client)
+    return await bot.run()

@@ -11,25 +11,28 @@ class Settings(BaseSettings):
 
     FIX_CERT: bool = False
 
-    SESSION_START_DELAY: int = 360
+    SESSION_START_DELAY: int = 30
 
-    REF_ID: str = '252453226_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b'
+    REF_ID: str = '252453226'
     SESSIONS_PER_PROXY: int = 1
     USE_PROXY: bool = True
     DISABLE_PROXY_REPLACE: bool = False
 
     DEVICE_PARAMS: bool = False
 
-    DEBUG_LOGGING: bool = False
+    DEBUG_LOGGING: bool = True
+    LOG_LEVEL: str = "DEBUG"
+    LOG_HTTP_REQUESTS: bool = False
 
     AUTO_UPDATE: bool = True
     CHECK_UPDATE_INTERVAL: int = 60
     BLACKLISTED_SESSIONS: str = ""
 
-    PET_ACTIVE_SKILL: str = 'default_skill'
     AUTO_UPGRADE: bool = True
     AUTO_FIGHT: bool = True
-    EQUIPMENT_NAMES: str = 'sword,shield,armor,helmet,boots'
+
+    # Задержка между запросами к рынку в секундах (мин, макс)
+    MARKET_MONITOR_DELAY_SECONDS: Tuple[int, int] = (2, 5)
 
     @property
     def blacklisted_sessions(self) -> List[str]:

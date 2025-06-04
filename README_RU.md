@@ -1,6 +1,6 @@
-# TonKombat Bot
+# Ton Kombat Market Bot
 
-[🇷🇺 Русский](README-RU.md) | [🇬🇧 English](README.md)
+[🇷🇺 Русский](README_RU.md) | [🇬🇧 English](README.md)
 
 [<img src="https://res.cloudinary.com/dkgz59pmw/image/upload/v1736756459/knpk224-28px-market_ksivis.svg" alt="Market Link" width="200">](https://t.me/MaineMarketBot?start=8HVF7S9K)
 [<img src="https://res.cloudinary.com/dkgz59pmw/image/upload/v1736756459/knpk224-28px-channel_psjoqn.svg" alt="Channel Link" width="200">](https://t.me/+vpXdTJ_S3mo0ZjIy)
@@ -21,7 +21,7 @@
 ---
 
 ## 📜 Описание
-**TonKombat Bot** — это автоматизированный бот для игры TonKombat. Поддерживает многопоточность, интеграцию прокси и автоматическое управление игрой.
+**Ton Kombat Market Bot** — это автоматизированный маркет бот для покупки необходимых предметов игры [Ton Kombat Market Bot](https://t.me/Ton_kombat_bot/app?startapp=252453226_9cbd0abe-0540-4f94-98f5-5c4a7fc1283b). Поддерживает многопоточность, интеграцию прокси и автоматическое управление игрой.
 
 ---
 
@@ -35,46 +35,42 @@
 
 ## 🛠️ Установка
 
-### Быстрый старт
-1. **Скачайте проект:**
-   ```bash
-   git clone https://bitbucket.org/Mffff4/TonKombat.git
-   cd TonKombat
-   ```
+```bash
+git clone https://github.com/mainiken/ton_kombat_market.git
+cd mrkt
+pip install -r requirements.txt
+```
 
-2. **Установите зависимости:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+Создайте файл `.env`:
 
-3. **Настройте параметры в файле `.env`:**
-   ```bash
-   API_ID=ваш_api_id
-   API_HASH=ваш_api_hash
-   ```
+```bash
+API_ID=ваш_api_id
+API_HASH=ваш_api_hash
+```
 
 ### Ручная установка
-1. **Linux:**
-   ```bash
-   sudo sh install.sh
-   python3 -m venv venv
-   source venv/bin/activate
-   pip3 install -r requirements.txt
-   cp .env-example .env
-   nano .env  # Укажите свои API_ID и API_HASH
-   python3 main.py
-   ```
 
-2. **Windows:**
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate
-   pip install -r requirements.txt
-   copy .env-example .env
-   python main.py
-   ```
+#### Linux
 
----
+```bash
+sudo sh install.sh
+python3 -m venv venv
+source venv/bin/activate
+pip3 install -r requirements.txt
+cp .env-example .env
+nano .env  # Укажите свои API_ID и API_HASH
+python3 main.py
+```
+
+#### Windows
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+copy .env-example .env
+python main.py
+```
 
 ## ⚙️ Настройки
 
@@ -97,23 +93,51 @@
 
 ---
 
+## 🛍️ Формат файла .buy
+
+Файл `.buy` представляет собой JSON массив объектов, каждый из которых описывает правило покупки предмета на рынке. Бот будет искать предметы, соответствующие каждому правилу, и покупать их до достижения указанного количества (`quantity`).
+
+Пример структуры файла `.buy-example`:
+
+```json
+[
+  {
+    "equipment_type": "*",
+    "max_price_tok": 6000,
+    "rarity": "uncommon",
+    "required_stats": [
+      {"type": "reflect-percent", "min_level": 4},
+      {"type": "reflect-percent", "min_level": 3}
+    ],
+    "quantity": 1
+  }
+]
+```
+
+Описание полей:
+
+- `equipment_type` (строка): Тип предмета (например, "sword", "shield", "wings", "necklace", "helmet", "armor", "boots", "animal"). Используйте "*" для любого типа.
+- `max_price_tok` (число): Максимальная цена в токенах (TOK), которую вы готовы заплатить за предмет.
+- `rarity` (строка): Редкость предмета ("common", "uncommon", "rare", "epic", "legendary", "mythic").
+- `required_stats` (массив объектов): Список обязательных характеристик и их минимальных уровней. Если указано несколько характеристик, предмет должен иметь *все* из них с указанным или более высоким уровнем.
+  - `type` (строка): Тип характеристики (например, "reflect-percent", "life-steal-percent", "attack-percent", "hp-flat-primary" и т.д.).
+  - `min_level` (число): Минимальный требуемый уровень характеристики.
+- `quantity` (число): Количество предметов с данным набором характеристик и максимальной ценой, которое бот должен купить.
+- `bought` (число, необязательно, добавляется ботом): Количество уже купленных предметов по этому правилу. Не редактируйте это поле вручную.
+
+---
+
 ## 💰 Поддержка и донаты
 
-Поддержите разработку с помощью криптовалют или платформ:
+Поддержите разработку:
 
-| Валюта               | Адрес кошелька                                                                       |
-|----------------------|-------------------------------------------------------------------------------------|
-| Bitcoin (BTC)        |bc1qt84nyhuzcnkh2qpva93jdqa20hp49edcl94nf6| 
-| Ethereum (ETH)       |0xc935e81045CAbE0B8380A284Ed93060dA212fa83| 
-| TON                  |UQBlvCgM84ijBQn0-PVP3On0fFVWds5SOHilxbe33EDQgryz|
-| Binance Coin         |0xc935e81045CAbE0B8380A284Ed93060dA212fa83| 
-| Solana (SOL)         |3vVxkGKasJWCgoamdJiRPy6is4di72xR98CDj2UdS1BE| 
-| Ripple (XRP)         |rPJzfBcU6B8SYU5M8h36zuPcLCgRcpKNB4| 
-| Dogecoin (DOGE)      |DST5W1c4FFzHVhruVsa2zE6jh5dznLDkmW| 
-| Polkadot (DOT)       |1US84xhUghAhrMtw2bcZh9CXN3i7T1VJB2Gdjy9hNjR3K71| 
-| Litecoin (LTC)       |ltc1qcg8qesg8j4wvk9m7e74pm7aanl34y7q9rutvwu| 
-| Matic                |0xc935e81045CAbE0B8380A284Ed93060dA212fa83| 
-| Tron (TRX)           |TQkDWCjchCLhNsGwr4YocUHEeezsB4jVo5| 
+| Валюта        | Адрес |
+|---------------|-------|
+| **Bitcoin**   | `bc1pfuhstqcwwzmx4y9jx227vxcamldyx233tuwjy639fyspdrug9jjqer6aqe` |
+| **Ethereum**  | `0x9c7ee1199f3fe431e45d9b1ea26c136bd79d8b54` |
+| **TON**       | `UQBpZGp55xrezubdsUwuhLFvyqy6gldeo-h22OkDk006e1CL` |
+| **BNB**       | `0x9c7ee1199f3fe431e45d9b1ea26c136bd79d8b54` |
+| **Solana**    | `HXjHPdJXyyddd7KAVrmDg4o8pRL8duVRMCJJF2xU8JbK` |
 
 ---
 
