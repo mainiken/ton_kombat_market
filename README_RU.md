@@ -37,7 +37,7 @@
 
 ```bash
 git clone https://github.com/mainiken/ton_kombat_market.git
-cd mrkt
+cd ton_kombat_market
 pip install -r requirements.txt
 ```
 

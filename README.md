@@ -39,7 +39,7 @@
 1. **Download the project:**
    ```bash
    git clone https://github.com/mainiken/ton_kombat_market.git
-   cd mrkt
+   cd ton_kombat_market
    ```
 
 2. **Install dependencies:**
