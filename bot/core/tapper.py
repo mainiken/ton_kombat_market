@@ -465,7 +465,7 @@ class MarketMonitorBot(BaseBot):
                             self._log('error', f"Ошибка при получении рынка: {response.status}, message='{response.reason}', url={response.url}")
                             raise InvalidSession(f"Получена ошибка 401 для сессии {self.session_name}. Требуется переавторизация.")
 
-                        error_400_count = 0
+                        error_400_count = 0 # Сброс счетчика 400 ошибок при успешном запросе
                         response.raise_for_status()
                         result = await response.json()
                         items = result.get('data', {}).get('items', [])
@@ -530,10 +530,20 @@ class MarketMonitorBot(BaseBot):
                         self._log('debug', f"Задержка перед следующим запросом к рынку: {delay_time:.2f} с", emoji_key='sleep')
                         await asyncio.sleep(delay_time)
 
-            except Exception as e:
-                self._log('error', f"Ошибка при получении рынка: {e}")
-                self._log('debug', traceback.format_exc())
-                await asyncio.sleep(uniform(5, 10))
+            except aiohttp.ClientError as e:
+                if isinstance(e, aiohttp.ClientResponseError) and e.status == 400:
+                    self._log('warning', f"Получена ошибка 400 (Bad Request) при получении рынка: {e}", emoji_key='warning')
+                    error_400_count += 1
+                    if error_400_count >= 3: # Порог для перезапуска сессии
+                        self._log('error', f"Получено {error_400_count} последовательных ошибок 400. Завершаю сессию для перезапуска.", emoji_key='error')
+                        raise InvalidSession(f"Получено {error_400_count} последовательных ошибок 400 для сессии {self.session_name}. Требуется перезапуск.")
+                    else:
+                        self._log('debug', f"Ошибка 400: {e}. Количество последовательных ошибок 400: {error_400_count}. Короткий сон.", emoji_key='sleep')
+                        await asyncio.sleep(uniform(5, 10)) # Короткий сон после 400, если порог не достигнут
+                else:
+                    self._log('error', f"Ошибка при получении рынка: {e}")
+                    self._log('debug', traceback.format_exc())
+                    await asyncio.sleep(uniform(5, 10))
                 continue
 
             if all(f['bought'] >= f['quantity'] for f in filters):
