@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     AUTO_FIGHT: bool = True
 
     # Задержка между запросами к рынку в секундах (мин, макс)
-    MARKET_MONITOR_DELAY_SECONDS: Tuple[int, int] = (2, 5)
+    MARKET_MONITOR_DELAY_SECONDS: Tuple[int, int] = (5, 25)
 
     @property
     def blacklisted_sessions(self) -> List[str]:

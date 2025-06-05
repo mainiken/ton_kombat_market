@@ -49,6 +49,234 @@ from bot.utils import logger, config_utils, CONFIG_PATH
 from bot.exceptions import InvalidSession
 
 
+class FilterManager:
+    def __init__(self, filters: List[Dict]):
+        self._filters = filters
+        for filter_obj in self._filters:
+            if 'quantity' not in filter_obj:
+                filter_obj['quantity'] = 1
+            filter_obj['bought'] = 0
+        self._current_filter_index = 0
+
+    @property
+    def current_filter(self) -> Dict:
+        return self._filters[self._current_filter_index]
+
+    def next_filter(self) -> None:
+        self._current_filter_index = \
+            (self._current_filter_index + 1) % len(self._filters)
+
+    def is_current_filter_complete(self) -> bool:
+        return (self._filters[self._current_filter_index]['bought'] >=
+                self._filters[self._current_filter_index]['quantity'])
+
+    def all_filters_complete(self) -> bool:
+        return all(f['bought'] >= f['quantity'] for f in self._filters)
+
+    def mark_bought(self, market_equipment_id: str, bought_ids: set) -> None:
+        if market_equipment_id not in bought_ids:
+            self._filters[self._current_filter_index]['bought'] += 1
+            bought_ids.add(market_equipment_id)
+
+    def __str__(self) -> str:
+        return str(self._filters)
+
+
+class ItemEvaluator:
+    def __init__(self, log_method):
+        self._log = log_method
+
+    def evaluate(self, item: Dict, filter_obj: Dict, bought_ids: set) -> \
+            Optional[Tuple[str, str, float, List, str]]:
+        item_name = item.get('metadata', {}).get('equipment', {}).get('name', '???')
+        stats = item.get('metadata', {}).get('equipment', {}).get(
+            'equipment_stats', [])
+
+        user_equipment_id = item.get('user_equipment_id')
+        market_equipment_id = item.get('id')
+
+        type_ok = (filter_obj.get('equipment_type', '*') == '*' or
+                   item.get('equipment_type') ==
+                   filter_obj.get('equipment_type'))
+        if not type_ok:
+            return None
+
+        price_tok = float(item.get('price_gross', 0)) / 1_000_000_000
+        max_price = filter_obj.get('max_price_tok', 1e12)
+        price_ok = price_tok <= max_price
+        if not price_ok:
+            return None
+
+        required_stats_match = True
+        used_stats_indices = set()
+        matched_stats_info = []
+
+        required_stats_filters = filter_obj.get('required_stats', [])
+        if required_stats_filters:
+            for stat_filter in required_stats_filters:
+                found_match = False
+                for idx, stat in enumerate(stats):
+                    if idx in used_stats_indices:
+                        continue
+                    if stat.get('type') == stat_filter.get('type'):
+                        stat_level = int(stat.get('level', 0))
+                        min_level = int(stat_filter.get('min_level', 0))
+                        if stat_level >= min_level:
+                            matched_stats_info.append((stat_filter, stat))
+                            used_stats_indices.add(idx)
+                            found_match = True
+                            break
+                if not found_match:
+                    required_stats_match = False
+                    break
+
+            if len(matched_stats_info) != len(required_stats_filters):
+                 required_stats_match = False
+                 self._log('debug',
+                           f"Предмет {item_name} не соответствует фильтру - не "
+                           f"все required_stats найдены или количество не "
+                           "совпадает.")
+
+
+        if not required_stats_match:
+            return None
+
+        status = 'success'
+        formatted_stats = []
+        for stat_filter, stat in matched_stats_info:
+            stat_name = stat_filter['type'].replace('-', ' ').capitalize()
+            stat_level = stat.get('level')
+            stat_value = stat.get('value')
+            color = self._stat_color(stat_level)
+            if 'percent' in stat_filter['type']:
+                value_str = f"+{stat_value}%" if stat_value is not None else "+?"
+            else:
+                value_str = f"+{stat_value}" if stat_value is not None else "+?"
+            formatted_stats.append(f"{color} {stat_name} {value_str}")
+        stats_str = ', '.join(formatted_stats)
+        price_info = "✅ цена"
+        message = (f"{item_name} [market_id:{market_equipment_id}] "
+                   f"({stats_str}) | {price_info} {price_tok:.1f} TOK")
+        self._log('info', message, status)
+
+        return (item_name, market_equipment_id, price_tok, formatted_stats,
+                stats_str)
+
+    def _stat_color(self, level: int) -> str:
+        if level >= 5:
+            return '🟣'
+        elif level == 4:
+            return '🔵'
+        elif level == 3:
+            return '🟢'
+        elif level == 2:
+            return '🟡'
+        elif level == 1:
+            return '🟠'
+        else:
+            return '⚪'
+
+
+class MarketNavigator:
+    def __init__(self, max_pages: int, log_method):
+        self._max_pages = max_pages
+        self._log = log_method
+        self._current_page = 1
+        self._direction = 1
+        self._consecutive_empty = 0
+        self._next_direction_change_time = time() + uniform(60, 1200)
+        self._requests_in_current_direction = 0
+        self._max_requests_in_random_direction = 0
+
+    @property
+    def current_page(self) -> int:
+        return self._current_page
+
+    @property
+    def direction(self) -> int:
+        return self._direction
+
+    def process_page_result(self, items: List[Dict]) -> None:
+        now = time()
+        if not items:
+            self._consecutive_empty += 1
+            if self._consecutive_empty >= 3:
+                self._direction = -self._direction
+                self._consecutive_empty = 0
+                self._log('debug',
+                          f"Обнаружены 3 пустые страницы. Меняю направление на "
+                          f"{self._direction}", emoji_key='info')
+                self._requests_in_current_direction = 0
+        else:
+            self._consecutive_empty = 0
+
+        if now >= self._next_direction_change_time and self._direction == 1:
+            self._direction = -1
+            self._log('debug',
+                      "Настало время сменить направление на обратное для "
+                      "имитации человека.", emoji_key='info')
+            self._max_requests_in_random_direction = randint(1, 3)
+            self._requests_in_current_direction = 0
+            self._next_direction_change_time = now + uniform(60, 1200)
+
+        if (self._direction == -1 and self._requests_in_current_direction >=
+                self._max_requests_in_random_direction):
+            self._direction = 1
+            self._log('debug',
+                      "Достигнут лимит случайных запросов назад. Возвращаюсь "
+                      "к основному направлению.", emoji_key='info')
+            self._requests_in_current_direction = 0
+
+        self._requests_in_current_direction += 1
+
+        if self._direction == 1:
+            self._current_page += 1
+            if self._current_page > self._max_pages:
+                self._log('info',
+                          f"Достигнут лимит страниц {self._max_pages} при "
+                          f"движении вперед. Начинаю с первой страницы.",
+                          emoji_key='info')
+                self._current_page = 1
+                self._next_direction_change_time = time() + uniform(60, 1200)
+                self._requests_in_current_direction = 0
+                self._max_requests_in_random_direction = 0
+
+        elif self._direction == -1:
+             self._current_page -= 1
+             if self._current_page < 1:
+                 self._log('info',
+                           f"Достигнута первая страница при движении назад. "
+                           f"Меняю направление на вперед.", emoji_key='info')
+                 self._direction = 1
+                 self._current_page = 1
+                 self._next_direction_change_time = time() + uniform(60, 1200)
+                 self._requests_in_current_direction = 0
+                 self._max_requests_in_random_direction = 0
+
+
+class RateLimiter:
+    def __init__(self, request_limit: int, time_window: int, log_method):
+        self._request_limit = request_limit
+        self._time_window = time_window
+        self._log = log_method
+        self._request_times = []
+
+    async def wait_for_next_request(self) -> None:
+        now = time()
+        self._request_times = [t for t in self._request_times if now - t <
+                               self._time_window]
+
+        if len(self._request_times) >= self._request_limit:
+            sleep_time = self._time_window - (now - self._request_times[0]) + 0.5
+            self._log('debug',
+                      f"Достигнут лимит запросов ({self._request_limit}/"
+                      f"{self._time_window}s). Сон на {sleep_time:.2f}s",
+                      emoji_key='sleep')
+            await asyncio.sleep(sleep_time)
+
+        self._request_times.append(time())
+
+
 class BaseBot:
     EMOJI = {
         'debug': '🔍',
@@ -247,6 +475,7 @@ class MarketMonitorBot(BaseBot):
         }
         self.access_token_created_time = 0
         self._current_ref_id = None
+        self._item_evaluator = ItemEvaluator(self._log)
 
     def get_ref_id(self) -> str:
         if self._current_ref_id is None:
@@ -361,67 +590,66 @@ class MarketMonitorBot(BaseBot):
     async def debug_monitor_market(self, page_size: int = 20):
         REQUEST_LIMIT = 25
         TIME_WINDOW = 60
-        request_times = []
-        base_delay = 2.0
-        max_delay = 10.0
-        backoff_factor = 1.5
-        current_delay = base_delay
+        ERROR_400_THRESHOLD = 5
+
         try:
             with open('.buy', 'r', encoding='utf-8') as f:
-                filters = json.load(f)
+                filters_data = json.load(f)
+            filter_manager = FilterManager(filters_data)
         except Exception as e:
-            self._log('error', f"Ошибка чтения .buy: {e}")
+            self._log('error', f"Ошибка чтения .buy: {e}", emoji_key='error')
             return
 
-        for f in filters:
-            if 'quantity' not in f:
-                f['quantity'] = 1
-            f['bought'] = 0
-
+        market_navigator = MarketNavigator(MARKET_PAGES_TO_MONITOR, self._log)
+        rate_limiter = RateLimiter(REQUEST_LIMIT, TIME_WINDOW, self._log)
         bought_ids = set()
-        current_page = 1
-        direction = 1
-        last_filter_index = 0
-        consecutive_empty = 0
         error_400_count = 0
-        token_refreshed = False
-        sleep_done = False
 
-        next_direction_change_time = time() + uniform(60, 1200)
-        requests_in_current_direction = 0
-        max_requests_in_random_direction = 0
+        self._log('debug', f"Старт мониторинга рынка. Фильтры: "
+                           f"{filter_manager}", emoji_key='debug')
 
-        self._log('debug', f"Старт мониторинга рынка. Фильтры: {filters}")
         while True:
-            f = filters[last_filter_index]
-            self._log('debug', f"Текущий фильтр: {f}")
-            if f['bought'] >= f['quantity']:
-                last_filter_index = (last_filter_index + 1) % len(filters)
-                continue
-            self._log('debug', f"Переход к фильтру: {f}, страница: {current_page}, направление: {direction}")
+            if filter_manager.is_current_filter_complete():
+                 self._log('debug',
+                           "Задача для текущего фильтра выполнена. "
+                           "Переход к следующему.")
+                 filter_manager.next_filter()
+                 if filter_manager.all_filters_complete():
+                     self._log('success',
+                               'Все задачи по мониторингу выполнены.',
+                               emoji_key='success')
+                     raise InvalidSession('Все задачи по мониторингу выполнены.')
+                 # Reset navigation/rate limiter for the new filter?
+                 # Decide if RateLimiter/Navigator state should persist across filters
+                 market_navigator = MarketNavigator(MARKET_PAGES_TO_MONITOR, self._log)
+                 rate_limiter = RateLimiter(REQUEST_LIMIT, TIME_WINDOW, self._log)
+                 await asyncio.sleep(uniform(2, 4)) # Small delay between filters
+                 continue
 
-            if random() < 0.2:
-                last_filter_index = (last_filter_index + 1) % len(filters)
-                current_page = 1
-                direction = 1
-                next_direction_change_time = time() + uniform(60, 1200)
-                requests_in_current_direction = 0
-                max_requests_in_random_direction = 0
-                await asyncio.sleep(uniform(2, 4))
-                continue
+
+            current_filter = filter_manager.current_filter
+            current_page = market_navigator.current_page
+            direction = market_navigator.direction
+
+            self._log('debug',
+                      f"Текущий фильтр: {current_filter}, страница: "
+                      f"{current_page}, направление: {direction}")
 
             params = {
                 'page': current_page,
+                'page_size': page_size,
             }
 
-            if 'equipment_type' in f and f['equipment_type'] != '*':
-                params['market_type'] = f['equipment_type']
-            if 'rarity' in f:
-                params['rarity'] = f['rarity']
+            if 'equipment_type' in current_filter and \
+                    current_filter['equipment_type'] != '*':
+                params['market_type'] = current_filter['equipment_type']
+            if 'rarity' in current_filter:
+                params['rarity'] = current_filter['rarity']
 
-            has_statistic = 'required_stats' in f and f['required_stats']
+            has_statistic = ('required_stats' in current_filter and
+                             current_filter['required_stats'])
             if has_statistic:
-                params['statistic'] = f['required_stats'][0]['type']
+                params['statistic'] = current_filter['required_stats'][0]['type']
 
             params['sort_by_price'] = 'asc'
 
@@ -430,226 +658,168 @@ class MarketMonitorBot(BaseBot):
 
             self._log('debug', f"Параметры запроса: {params}")
 
-            url = f"https://liyue.tonkombat.com/api/v1/market/equipment?{urlencode(params)}"
+            url = (f"https://liyue.tonkombat.com/api/v1/market/equipment?"
+                   f"{urlencode(params)}")
             headers = {
                 **self.headers,
                 'Authorization': f'tma {self._init_data}'
             }
 
             try:
-                now = time()
-                request_times = [t for t in request_times if now - t < TIME_WINDOW]
+                await rate_limiter.wait_for_next_request()
+                result = await self.make_request(method='get', url=url,
+                                                 headers=headers, ssl=False,
+                                                 timeout=aiohttp.ClientTimeout(total=20))
 
-                if len(request_times) >= REQUEST_LIMIT:
-                    sleep_time = TIME_WINDOW - (now - request_times[0]) + 0.5
-                    await asyncio.sleep(sleep_time)
-                    current_delay = min(current_delay * backoff_factor, max_delay)
-                    continue
+                if result is None:
+                     self._log('warning', "make_request вернул None. Пропускаем "
+                                          "обработку ответа и продолжаем цикл.",
+                               emoji_key='warning')
+                     await asyncio.sleep(uniform(*ERROR_SLEEP_SECONDS))
+                     continue
 
-                if len(request_times) < REQUEST_LIMIT * 0.8:
-                    current_delay = max(base_delay, current_delay / backoff_factor)
+                error_400_count = 0
 
-                actual_delay = current_delay * uniform(0.8, 1.2)
-                await asyncio.sleep(actual_delay)
+                items = result.get('data', {}).get('items', [])
+                self._log('debug', f"Найдено предметов: {len(items)} на странице "
+                                   f"{current_page}")
 
-                request_times.append(time())
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url=url,
-                        headers=headers,
-                        ssl=False,
-                        timeout=aiohttp.ClientTimeout(total=20)
-                    ) as response:
-                        self._log('debug', f"GET {url} | status: {response.status}")
-                        if response.status == 401:
-                            self._log('error', f"Ошибка при получении рынка: {response.status}, message='{response.reason}', url={response.url}")
-                            raise InvalidSession(f"Получена ошибка 401 для сессии {self.session_name}. Требуется переавторизация.")
+                market_navigator.process_page_result(items)
 
-                        error_400_count = 0 # Сброс счетчика 400 ошибок при успешном запросе
-                        response.raise_for_status()
-                        result = await response.json()
-                        items = result.get('data', {}).get('items', [])
-                        self._log('debug', f"Найдено предметов: {len(items)} на странице {current_page}")
-                        total_pages = (result.get('data', {}).get('total', 0) + page_size - 1) // page_size
+                if items:
+                    self._log('debug', f"Передаю {len(items)} предметов в "
+                                       f"_analyze_items")
+                    await self._analyze_items(items, current_filter,
+                                               current_page, bought_ids,
+                                               filter_manager)
 
-                        if not items:
-                            self._log('debug', f"Пустая страница {current_page}")
-                            consecutive_empty += 1
-                            if consecutive_empty >= 3:
-                                direction = -direction
-                                consecutive_empty = 0
-                                self._log('debug', f"Обнаружены 3 пустые страницы. Меняю направление на {direction}")
-                                requests_in_current_direction = 0
-                        else:
-                            self._log('debug', f"Передаю {len(items)} предметов в _analyze_items")
-                            consecutive_empty = 0
-                            await self._analyze_items(items, f, current_page, bought_ids)
 
-                        now = time()
-                        if now >= next_direction_change_time and direction == 1:
-                            direction = -1
-                            self._log('debug', "Настало время сменить направление на обратное для имитации человека.")
-                            max_requests_in_random_direction = randint(1, 3)
-                            requests_in_current_direction = 0
-                            next_direction_change_time = now + uniform(60, 1200)
+                # Original page logic moved to MarketNavigator
+                # Original delay logic left here for now as it depends on global setting
+                delay_time = uniform(*settings.MARKET_MONITOR_DELAY_SECONDS)
+                self._log('debug',
+                          f"Задержка перед следующим запросом к рынку согласно "
+                          f"настройкам: {delay_time:.2f} с", emoji_key='sleep')
+                await asyncio.sleep(delay_time)
 
-                        if direction == -1 and requests_in_current_direction >= max_requests_in_random_direction:
-                            direction = 1
-                            self._log('debug', "Достигнут лимит случайных запросов назад. Возвращаюсь к основному направлению.")
-                            requests_in_current_direction = 0
-
-                        requests_in_current_direction += 1
-
-                        if direction == 1 and current_page >= MARKET_PAGES_TO_MONITOR:
-                            self._log('info', f"Достигнут лимит страниц {MARKET_PAGES_TO_MONITOR} при движении вперед. Начинаю с первой страницы.")
-                            current_page = 1
-                            next_direction_change_time = time() + uniform(60, 1200)
-                            requests_in_current_direction = 0
-                            max_requests_in_random_direction = 0
-                            await asyncio.sleep(uniform(2, 4))
-                        elif direction == -1 and current_page <= 1:
-                             self._log('info', f"Достигнута первая страница при движении назад. Меняю направление на вперед.")
-                             direction = 1
-                             current_page = 1
-                             next_direction_change_time = time() + uniform(60, 1200)
-                             requests_in_current_direction = 0
-                             max_requests_in_random_direction = 0
-                             await asyncio.sleep(uniform(2, 4))
-
-                        current_page += direction
-                        if current_page < 1:
-                            current_page = 1
-                            direction = 1
-                            self._log('debug', "Номер страницы стал меньше 1. Сброс на 1 и изменение направления на вперед.")
-                            next_direction_change_time = time() + uniform(60, 1200)
-                            requests_in_current_direction = 0
-                            max_requests_in_random_direction = 0
-                            await asyncio.sleep(uniform(2, 4))
-
-                        delay_time = uniform(*settings.MARKET_MONITOR_DELAY_SECONDS)
-                        self._log('debug', f"Задержка перед следующим запросом к рынку: {delay_time:.2f} с", emoji_key='sleep')
-                        await asyncio.sleep(delay_time)
 
             except aiohttp.ClientError as e:
                 if isinstance(e, aiohttp.ClientResponseError) and e.status == 400:
-                    self._log('warning', f"Получена ошибка 400 (Bad Request) при получении рынка: {e}", emoji_key='warning')
+                    self._log('warning',
+                              f"Получена ошибка 400 (Bad Request) при "
+                              f"получении рынка: {e}", emoji_key='warning')
                     error_400_count += 1
-                    if error_400_count >= 3: # Порог для перезапуска сессии
-                        self._log('error', f"Получено {error_400_count} последовательных ошибок 400. Завершаю сессию для перезапуска.", emoji_key='error')
-                        raise InvalidSession(f"Получено {error_400_count} последовательных ошибок 400 для сессии {self.session_name}. Требуется перезапуск.")
+                    if error_400_count >= ERROR_400_THRESHOLD:
+                        self._log('error',
+                                  f"Получено {error_400_count} последовательных "
+                                  f"ошибок 400. Завершаю сессию для перезапуска.",
+                                  emoji_key='error')
+                        raise InvalidSession(
+                            f"Получено {error_400_count} последовательных "
+                            f"ошибок 400 для сессии {self.session_name}. "
+                            f"Требуется перезапуск.")
                     else:
-                        self._log('debug', f"Ошибка 400: {e}. Количество последовательных ошибок 400: {error_400_count}. Короткий сон.", emoji_key='sleep')
-                        await asyncio.sleep(uniform(5, 10)) # Короткий сон после 400, если порог не достигнут
+                        self._log('debug', f"Ошибка 400: {e}. Количество "
+                                           f"последовательных ошибок 400: "
+                                           f"{error_400_count}. Короткий сон.",
+                                           emoji_key='sleep')
+                        await asyncio.sleep(uniform(10, 20))
                 else:
-                    self._log('error', f"Ошибка при получении рынка: {e}")
+                    self._log('error',
+                              f"Ошибка при получении рынка (после make_request "
+                              f"retries?): {e}", emoji_key='error')
                     self._log('debug', traceback.format_exc())
-                    await asyncio.sleep(uniform(5, 10))
+                    await asyncio.sleep(uniform(15, 30))
                 continue
 
-            if all(f['bought'] >= f['quantity'] for f in filters):
-                self._log('success', 'Все задачи выполнены, мониторинг завершён.')
-                return
+            except InvalidSession:
+                 raise # Re-raise InvalidSession to be caught in run()
 
-    async def _analyze_items(self, items, filter_obj, page, bought_ids):
-        def stat_color(level):
-            if level >= 5:
-                return '🟣'
-            elif level == 4:
-                return '🔵'
-            elif level == 3:
-                return '🟢'
-            elif level == 2:
-                return '🟡'
-            elif level == 1:
-                return '🟠'
-            else:
-                return '⚪'
+            except Exception as e:
+                 self._log('error',
+                           f"Неизвестная ошибка в debug_monitor_market: {e}",
+                           emoji_key='error')
+                 self._log('debug', traceback.format_exc())
+                 await asyncio.sleep(uniform(60, 120))
+                 continue
 
-        self._log('debug', f"Анализ предметов на странице {page}, фильтр: {filter_obj}")
+            # This check is now handled by FilterManager and InvalidSession exception
+            # if all(f['bought'] >= f['quantity'] for f in filters):
+            #     self._log('success', 'Все задачи по мониторингу выполнены.', emoji_key='success')
+            #     raise InvalidSession('Все задачи по мониторингу выполнены.')
+
+
+    async def _analyze_items(self, items, filter_obj, current_page, \
+                              bought_ids, filter_manager: FilterManager):
+
+        self._log('debug', f"Анализ предметов на странице {current_page}, "
+                           f"фильтр: {filter_obj}")
         for item in items:
-            item_name = item.get('metadata', {}).get('equipment', {}).get('name', '???')
-            stats = item.get('metadata', {}).get('equipment', {}).get('equipment_stats', [])
-            self._log('debug', f"Проверяю предмет: {item_name}, статы: {stats}")
-            stats = [stat for stat in stats if not stat.get('primary', False)]
-            user_equipment_id = item.get('user_equipment_id')
-            market_equipment_id = item.get('id')
+            evaluation_result = self._item_evaluator.evaluate(item, filter_obj, \
+                                                              bought_ids)
 
-            type_ok = filter_obj.get('equipment_type', '*') == '*' or item.get('equipment_type') == filter_obj.get('equipment_type')
-            if not type_ok:
-                self._log('debug', f"Пропуск по типу: {item.get('equipment_type')} != {filter_obj.get('equipment_type')}")
-                continue
+            if evaluation_result:
+                (item_name, market_equipment_id, price_tok, formatted_stats,
+                 stats_str) = evaluation_result
+                status = 'success'
+                price_info = "✅ цена"
+                message = (f"{item_name} [market_id:{market_equipment_id}] "
+                           f"({stats_str}) | {price_info} {price_tok:.1f} TOK")
+                self._log('info', message, status)
 
-            price_tok = float(item.get('price_gross', 0)) / 1_000_000_000
-            max_price = filter_obj.get('max_price_tok', 1e12)
-            price_ok = price_tok <= max_price
-            if not price_ok:
-                self._log('debug', f"Пропуск по цене: {price_tok} > {max_price}")
-                continue
+                if market_equipment_id and market_equipment_id not in bought_ids:
+                    self._log('debug', f"Пробую купить: {item_name} "
+                                       f"({market_equipment_id}) за "
+                                       f"{price_tok:.1f} TOK")
+                    ok = await self.buy_equipment(market_equipment_id)
+                    if ok:
+                        filter_manager.mark_bought(market_equipment_id, \
+                                                   bought_ids)
+                        self._log('success',
+                                  f"Успешно куплено: {item_name} "
+                                  f"({market_equipment_id}). Куплено "
+                                  f"{filter_obj['bought']}/"
+                                  f"{filter_obj['quantity']}.")
+                        if filter_manager.is_current_filter_complete():
+                            self._log('success',
+                                      f"Задача для фильтра {filter_obj} "
+                                      f"выполнена. Куплено "
+                                      f"{filter_obj['bought']}/"
+                                      f"{filter_obj['quantity']}.",
+                                      emoji_key='success')
+                            # Raise here to break the inner loop and check
+                            # if all filters are done in the outer loop
+                            raise InvalidSession(
+                                f'Задача для фильтра {filter_obj} выполнена.')
 
-            used_stats = set()
-            matched_stats = []
-            all_match = True
-            for stat_filter in filter_obj['required_stats']:
-                found = False
-                for idx, stat in enumerate(stats):
-                    if idx in used_stats:
-                        continue
-                    if stat.get('type') == stat_filter['type']:
-                        stat_level = int(stat.get('level', 0))
-                        min_level = int(stat_filter.get('min_level', 0))
-                        if stat_level >= min_level:
-                            matched_stats.append((stat_filter, stat, True))
-                            used_stats.add(idx)
-                            found = True
-                            break
-                if not found:
-                    all_match = False
-                    self._log('debug', f"Не найден required_stat: {stat_filter} в {item_name}")
-                    break
-            if not all_match or len(used_stats) != len(filter_obj['required_stats']):
-                self._log('debug', f"Пропуск предмета {item_name} — не все required_stat найдены")
-                continue
+                    else:
+                        self._log('error',
+                                  f"Покупка не удалась: {item_name} "
+                                  f"({market_equipment_id})")
+        # No explicit return is needed here
 
-            status = 'success'
-            formatted_stats = []
-            for stat_filter, stat, is_ok in matched_stats:
-                stat_name = stat_filter['type'].replace('-', ' ').capitalize()
-                min_level = stat_filter.get('min_level', 0)
-                stat_level = stat.get('level')
-                stat_value = stat.get('value')
-                color = stat_color(stat_level)
-                if 'percent' in stat_filter['type']:
-                    value_str = f"+{stat_value}%"
-                else:
-                    value_str = f"+{stat_value}"
-                formatted_stats.append(f"{color} {stat_name} {value_str}")
-            stats_str = ', '.join(formatted_stats)
-            price_info = "✅ цена"
-            message = f"{item_name} [{user_equipment_id}|{market_equipment_id}] ({stats_str}) | {price_info} {price_tok:.1f} TOK"
-            self._log('info', message, status)
-            if market_equipment_id and market_equipment_id not in bought_ids:
-                self._log('debug', f"Пробую купить: {market_equipment_id}")
-                ok = await self.buy_equipment(market_equipment_id)
-                if ok:
-                    filter_obj['bought'] += 1
-                    bought_ids.add(market_equipment_id)
-                    self._log('debug', f"Покупка успешна: {market_equipment_id}")
-                    if filter_obj['bought'] >= filter_obj['quantity']:
-                        self._log('success', 'Все задачи выполнены, мониторинг завершён.')
-                        raise InvalidSession('Все задачи выполнены')
-                else:
-                    self._log('error', f"Покупка не удалась: {market_equipment_id}")
-        return False
 
     async def process_bot_logic(self) -> None:
         if not hasattr(self, 'access_token_created_time'):
             self.access_token_created_time = 0
-        if time() - self.access_token_created_time >= self._token_live_time or not getattr(self, '_init_data', None):
-            await self.get_tg_web_data()
-            self.access_token_created_time = time()
+        if not getattr(self, '_init_data', None) or (time() - self.access_token_created_time) >= self._token_live_time:
+             self._log('info', "Получение или обновление TG Web Data...", emoji_key='info')
+             await self.get_tg_web_data()
+             self.access_token_created_time = time()
+             expiration_time = datetime.fromtimestamp(self.access_token_created_time + self._token_live_time, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+             self._log('info', f"TG Web Data обновлены. Токен действует примерно до {expiration_time}", emoji_key='success')
+
         await self.users_balance()
-        await self.debug_monitor_market()
-        await asyncio.sleep(uniform(2, 5))
+
+        try:
+            await self.debug_monitor_market()
+        except InvalidSession as e:
+            self._log('info', f"Завершение работы по причине: {e}", emoji_key='info')
+            raise e
+        except Exception as error:
+            sleep_duration = uniform(*ERROR_SLEEP_SECONDS)
+            self._log('error', f"Неизвестная ошибка в process_bot_logic: {error}. Сон на {int(sleep_duration)}s.")
+            self._log('debug', traceback.format_exc())
 
 
 async def run_tapper(tg_client: UniversalTelegramClient):
