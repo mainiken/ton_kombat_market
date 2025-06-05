@@ -380,16 +380,22 @@ class BaseBot:
 
     async def handle_401_error(self, error_401_count: int) -> int:
         if error_401_count >= MAX_401_RETRIES:
-            self._log('warning', "Ошибка 401 - Обновляем токен и уходим в длительный сон...")
-
-            await self.get_tg_web_data()
-
-            sleep_time = randint(*[x * 60 for x in LONG_SLEEP_MINUTES])
-            self._log('info', f"Сон на {sleep_time // 60} минут")
-            await asyncio.sleep(sleep_time)
-
-            return 0
-        return error_401_count
+            self._log('warning', "Ошибка 401 - Пытаемся обновить токен...")
+            try:
+                await self.get_tg_web_data()
+                self.access_token_created_time = time() # Обновляем время получения токена
+                expiration_time = datetime.fromtimestamp(self.access_token_created_time + self._token_live_time, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                self._log('info', f"TG Web Data успешно обновлены. Токен действует примерно до {expiration_time}", emoji_key='success')
+                return 0  # Сбрасываем счетчик при успешном обновлении
+            except InvalidSession as e:
+                 self._log('error', f"Не удалось обновить TG Web Data после ошибок 401: {e}. Завершение сессии.", emoji_key='error')
+                 raise e # Пробрасываем исключение для завершения сессии
+            except Exception as e:
+                 self._log('error', f"Неизвестная ошибка при попытке обновить TG Web Data после ошибок 401: {e}. Сон перед повторной попыткой.", emoji_key='error')
+                 self._log('debug', traceback.format_exc())
+                 await asyncio.sleep(RETRY_DELAY_SECONDS) # Короткий сон при ошибке обновления
+                 return error_401_count + 1 # Увеличиваем счетчик, если обновление не удалось
+        return error_401_count + 1 # Увеличиваем счетчик, если MAX_401_RETRIES еще не достигнут
 
     async def make_request(self, method: str, url: str, **kwargs) -> Optional[Dict]:
         if not self._http_client:
